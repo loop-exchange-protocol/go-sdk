@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/loop-exchange-protocol/go-sdk/pkg/bundle"
+	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
 	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
 )
 
@@ -194,6 +195,137 @@ func TestCLIReferenceAndMirroredJourney(t *testing.T) {
 		if err != nil || string(content) != "portable\n" {
 			t.Fatalf("restored %s content = %q, %v", root, content, err)
 		}
+	}
+}
+
+func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	grandchildUpstream := filepath.Join(tmp, "grandchild-upstream")
+	mustGit(t, "", "init", "-b", "main", grandchildUpstream)
+	if err := os.WriteFile(filepath.Join(grandchildUpstream, "grandchild.txt"), []byte("recursive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, grandchildUpstream, "add", "grandchild.txt")
+	mustGit(t, grandchildUpstream, "-c", "user.name=LXP Test", "-c", "user.email=lxp@example.test", "commit", "-m", "grandchild")
+	grandchildRemote, stopGrandchild := serveGitRepository(t, grandchildUpstream)
+
+	childUpstream := filepath.Join(tmp, "child-upstream")
+	mustGit(t, "", "init", "-b", "main", childUpstream)
+	if err := os.WriteFile(filepath.Join(childUpstream, "child.txt"), []byte("submodule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, childUpstream, "add", "child.txt")
+	mustGit(t, childUpstream, "-c", "user.name=LXP Test", "-c", "user.email=lxp@example.test", "commit", "-m", "child")
+	mustGit(t, childUpstream, "submodule", "add", grandchildRemote, "deps/grandchild")
+	mustGit(t, childUpstream, "-c", "user.name=LXP Test", "-c", "user.email=lxp@example.test", "commit", "-am", "add grandchild")
+	childRemote, stopChild := serveGitRepository(t, childUpstream)
+
+	parentUpstream := filepath.Join(tmp, "parent-upstream")
+	mustGit(t, "", "init", "-b", "main", parentUpstream)
+	if err := os.WriteFile(filepath.Join(parentUpstream, "README.md"), []byte("parent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, parentUpstream, "add", "README.md")
+	mustGit(t, parentUpstream, "-c", "user.name=LXP Test", "-c", "user.email=lxp@example.test", "commit", "-m", "parent")
+	mustGit(t, parentUpstream, "submodule", "add", childRemote, "deps/child")
+	mustGit(t, parentUpstream, "-c", "user.name=LXP Test", "-c", "user.email=lxp@example.test", "commit", "-am", "add child")
+	parentRemote, stopParent := serveGitRepository(t, parentUpstream)
+
+	work := filepath.Join(tmp, "work")
+	if err := run(ctx, []string{"init", work}); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "", "clone", "--recurse-submodules", parentRemote, filepath.Join(work, "source"))
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(ctx, []string{"add", "source"}); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(work, ".lxp", "sessions", "work", "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instance.Components) != 3 {
+		t.Fatalf("nested session components = %#v", instance.Components)
+	}
+
+	artifacts := map[string]string{}
+	for _, distribution := range []string{"reference", "embedded", "mirrored"} {
+		path := filepath.Join(tmp, distribution+"-submodule.lxpz")
+		if err := run(ctx, []string{"export", "--distribution", distribution, path}); err != nil {
+			t.Fatalf("export %s: %v", distribution, err)
+		}
+		artifact, err := readBundleArtifact(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(artifact.Components) != 3 || artifact.Components[0].Path != "source" || artifact.Components[1].Path != "source/deps/child" || artifact.Components[2].Path != "source/deps/child/deps/grandchild" {
+			t.Fatalf("%s nested Artifact = %#v", distribution, artifact.Components)
+		}
+		artifacts[distribution] = path
+	}
+	childWorktree := filepath.Join(work, "source", "deps", "child")
+	if err := os.WriteFile(filepath.Join(childWorktree, "child.txt"), []byte("submodule-v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, childWorktree, "add", "child.txt")
+	mustGit(t, childWorktree, "-c", "user.name=LXP Test", "-c", "user.email=lxp@example.test", "commit", "-m", "child v2")
+	if err := run(ctx, []string{"add", "source/deps/child"}); err != nil {
+		t.Fatal(err)
+	}
+	advancedEmbedded := filepath.Join(tmp, "embedded-submodule-advanced.lxpz")
+	if err := run(ctx, []string{"export", "--distribution", "embedded", advancedEmbedded}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	online := filepath.Join(tmp, "reference-submodule-online")
+	if err := run(ctx, []string{"import", artifacts["reference"], online}); err != nil {
+		t.Fatal(err)
+	}
+	stopParent()
+	stopChild()
+	stopGrandchild()
+	offlineReference := filepath.Join(tmp, "reference-submodule-offline")
+	if err := run(ctx, []string{"import", artifacts["reference"], offlineReference}); err == nil {
+		t.Fatal("offline nested reference import unexpectedly succeeded")
+	}
+	if _, err := os.Stat(offlineReference); !os.IsNotExist(err) {
+		t.Fatalf("failed nested reference target was not cleaned: %v", err)
+	}
+	for _, distribution := range []string{"embedded", "mirrored"} {
+		target := filepath.Join(tmp, distribution+"-submodule-offline")
+		if err := run(ctx, []string{"import", artifacts[distribution], target}); err != nil {
+			t.Fatalf("offline %s import: %v", distribution, err)
+		}
+		content, err := os.ReadFile(filepath.Join(target, "source", "deps", "child", "child.txt"))
+		if err != nil || string(content) != "submodule\n" {
+			t.Fatalf("%s nested content = %q, %v", distribution, content, err)
+		}
+		grandchildContent, err := os.ReadFile(filepath.Join(target, "source", "deps", "child", "deps", "grandchild", "grandchild.txt"))
+		if err != nil || string(grandchildContent) != "recursive\n" {
+			t.Fatalf("%s recursive content = %q, %v", distribution, grandchildContent, err)
+		}
+	}
+	advancedTarget := filepath.Join(tmp, "embedded-submodule-advanced-offline")
+	if err := run(ctx, []string{"import", advancedEmbedded, advancedTarget}); err != nil {
+		t.Fatal(err)
+	}
+	advancedContent, err := os.ReadFile(filepath.Join(advancedTarget, "source", "deps", "child", "child.txt"))
+	if err != nil || string(advancedContent) != "submodule-v2\n" {
+		t.Fatalf("advanced nested content = %q, %v", advancedContent, err)
+	}
+	if staged := strings.TrimSpace(mustGitText(t, filepath.Join(advancedTarget, "source"), "diff", "--cached", "--name-only")); staged != "deps/child" {
+		t.Fatalf("restored parent gitlink selection = %q", staged)
 	}
 }
 

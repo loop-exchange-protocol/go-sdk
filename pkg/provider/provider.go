@@ -10,8 +10,9 @@ import (
 )
 
 type MaterializeTarget struct {
-	Workdir string
-	Path    string
+	Workdir  string
+	Path     string
+	Children []protocol.ChildComponent
 }
 
 type Provider interface {
@@ -41,6 +42,19 @@ type Adopter interface {
 type Tracker interface {
 	Add(ctx context.Context, ref protocol.ResolvedRef, paths []string) error
 	Status(ctx context.Context, ref protocol.ResolvedRef) ([]Change, error)
+}
+
+// NestedDiscoverer reports initialized native child roots. Core registers each
+// returned root as a nested Component and recursively asks its owning Provider.
+type NestedDiscoverer interface {
+	DiscoverChildren(ctx context.Context, ref protocol.ResolvedRef) ([]string, error)
+}
+
+// BoundaryTracker updates Provider-native attachment metadata after a nested
+// child is selected. Providers must ignore children that are simple ownership
+// carve-outs rather than native attachments.
+type BoundaryTracker interface {
+	TrackChild(ctx context.Context, parent, child protocol.ResolvedRef) error
 }
 
 type Change struct {

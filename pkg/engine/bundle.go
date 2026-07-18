@@ -77,7 +77,7 @@ func (e *Engine) PlanBundle(ctx context.Context, path string) ([]ComponentPlan, 
 
 func (e *Engine) planArtifact(ctx context.Context, a spec.Artifact) ([]ComponentPlan, error) {
 	plans := make([]ComponentPlan, 0, len(a.Components))
-	for _, component := range a.Components {
+	for _, component := range sortedArtifact(a.Components, true) {
 		p, err := e.Providers.Get(component.Provider)
 		if err != nil {
 			return nil, err
@@ -92,6 +92,7 @@ func (e *Engine) planArtifact(ctx context.Context, a spec.Artifact) ([]Component
 		} else if component.Embedded != nil {
 			ref.Revision = component.Embedded.Revision
 		}
+		ref.Children = directArtifactChildren(component, a.Components)
 		plan, err := p.Plan(ctx, ref)
 		if err != nil {
 			return nil, fmt.Errorf("plan component %q: %w", component.ID, err)
@@ -152,7 +153,9 @@ func (e *Engine) Export(ctx context.Context, opts ExportOptions) (string, error)
 		Requirements: instance.Requirements,
 		Provenance:   spec.Provenance{CreatedAt: time.Now().UTC().Format(time.RFC3339), Engine: "lxp/0.1.0", Parent: instance.Metadata["parent_artifact"]},
 	}
-	for _, ref := range instance.Components {
+	portableByID := make(map[string]spec.Component, len(instance.Components))
+	revisions := make(map[string]string, len(instance.Components))
+	for _, ref := range sortedResolved(instance.Components, false) {
 		p, err := e.Providers.Get(ref.Provider)
 		if err != nil {
 			return "", err
@@ -161,9 +164,18 @@ func (e *Engine) Export(ctx context.Context, opts ExportOptions) (string, error)
 		if err != nil {
 			return "", err
 		}
+		ref.Children = directResolvedChildren(ref, instance.Components, revisions)
 		portable, err := p.ExportComponent(ctx, ref, mode, store)
 		if err != nil {
 			return "", fmt.Errorf("export component %q: %w", ref.ID, err)
+		}
+		portableByID[portable.ID] = portable
+		revisions[portable.ID] = componentRevision(portable)
+	}
+	for _, ref := range sortedResolved(instance.Components, true) {
+		portable, ok := portableByID[ref.ID]
+		if !ok {
+			return "", fmt.Errorf("component %q was not exported", ref.ID)
 		}
 		a.Components = append(a.Components, portable)
 	}
@@ -293,7 +305,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 	defer os.RemoveAll(tempSession)
 	workdir := filepath.Join(tempSession, "workdir")
 	var refs []protocol.ResolvedRef
-	for _, ref := range a.Components {
+	for _, ref := range sortedArtifact(a.Components, true) {
 		target, err := bundle.SafeJoin(workdir, ref.Path)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
@@ -306,7 +318,13 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 		if ref.Contract != p.Contract() {
 			return protocol.InstanceManifest{}, fmt.Errorf("component %q requires provider %s@%s; installed contract is %s", ref.ID, ref.Provider, ref.Contract, p.Contract())
 		}
-		materialized, err = p.Restore(ctx, ref, store, provider.MaterializeTarget{Workdir: workdir, Path: target})
+		children := directArtifactChildren(ref, a.Components)
+		if hasArtifactAncestor(ref, a.Components) {
+			if err := validateNestedTarget(workdir, target); err != nil {
+				return protocol.InstanceManifest{}, fmt.Errorf("import ref %q: %w", ref.ID, err)
+			}
+		}
+		materialized, err = p.Restore(ctx, ref, store, provider.MaterializeTarget{Workdir: workdir, Path: target, Children: children})
 		if err != nil {
 			return protocol.InstanceManifest{}, fmt.Errorf("import ref %q: %w", ref.ID, err)
 		}
@@ -375,6 +393,53 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 	}
 	completed = true
 	return instance, nil
+}
+
+func hasArtifactAncestor(component spec.Component, components []spec.Component) bool {
+	for _, candidate := range components {
+		if pathContains(candidate.Path, component.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateNestedTarget(workdir, target string) error {
+	rel, err := filepath.Rel(workdir, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("nested Component target is outside the workdir")
+	}
+	current := workdir
+	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("nested Component path crosses symlink %q", filepath.ToSlash(strings.Join(parts[:i+1], string(filepath.Separator))))
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return fmt.Errorf("nested Component ancestor %q is not a directory", filepath.ToSlash(strings.Join(parts[:i+1], string(filepath.Separator))))
+		}
+		if i == len(parts)-1 {
+			if !info.IsDir() {
+				return fmt.Errorf("nested Component target is not a directory")
+			}
+			entries, err := os.ReadDir(current)
+			if err != nil {
+				return err
+			}
+			if len(entries) != 0 {
+				return fmt.Errorf("nested Component target is not empty")
+			}
+		}
+	}
+	return nil
 }
 
 func validateArtifactLock(a spec.Artifact, lock spec.Lock, manifestDigest string) error {

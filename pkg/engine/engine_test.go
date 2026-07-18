@@ -172,3 +172,32 @@ func TestVerifyPayloadsRejectsDeclaredSizeMismatch(t *testing.T) {
 		t.Fatal("declared payload size mismatch unexpectedly verified")
 	}
 }
+
+func TestValidateNestedTargetRejectsPhysicalCollisions(t *testing.T) {
+	workdir := t.TempDir()
+	nonEmpty := filepath.Join(workdir, "parent", "non-empty")
+	if err := os.MkdirAll(nonEmpty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmpty, "owned.txt"), []byte("parent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateNestedTarget(workdir, nonEmpty); err == nil {
+		t.Fatal("non-empty nested target unexpectedly accepted")
+	}
+	empty := filepath.Join(workdir, "parent", "empty")
+	if err := os.MkdirAll(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateNestedTarget(workdir, empty); err != nil {
+		t.Fatalf("empty nested target rejected: %v", err)
+	}
+	outside := t.TempDir()
+	link := filepath.Join(workdir, "parent", "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateNestedTarget(workdir, filepath.Join(link, "child")); err == nil {
+		t.Fatal("cross-symlink nested target unexpectedly accepted")
+	}
+}

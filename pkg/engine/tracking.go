@@ -34,7 +34,8 @@ func (e *Engine) Status(sessionID string) (WorktreeStatus, error) {
 	if err != nil {
 		return status, err
 	}
-	for _, component := range instance.Components {
+	for _, component := range sortedResolved(instance.Components, true) {
+		component.Children = directResolvedChildren(component, instance.Components, nil)
 		p, err := e.Providers.Get(component.Provider)
 		if err != nil {
 			return status, err
@@ -81,36 +82,32 @@ func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOption
 		if _, err := os.Lstat(target); err != nil {
 			return protocol.InstanceManifest{}, fmt.Errorf("add %q: %w", rel, err)
 		}
-		owned := false
-		for _, component := range instance.Components {
-			if rel == component.Path || strings.HasPrefix(rel, component.Path+"/") {
-				if opts.Provider != "" && (component.Provider != opts.Provider || component.Contract != opts.Contract) {
-					return protocol.InstanceManifest{}, fmt.Errorf("path %q is owned by %s@%s, not requested %s@%s", rel, component.Provider, component.Contract, opts.Provider, opts.Contract)
-				}
+		owner := deepestOwner(instance.Components, rel)
+		if owner >= 0 {
+			component := instance.Components[owner]
+			if opts.Provider != "" && (component.Provider != opts.Provider || component.Contract != opts.Contract) {
+				return protocol.InstanceManifest{}, fmt.Errorf("path %q is owned by %s@%s, not requested %s@%s", rel, component.Provider, component.Contract, opts.Provider, opts.Contract)
+			}
+			if opts.Provider == "" {
 				p, err := e.Providers.Get(component.Provider)
 				if err != nil {
 					return protocol.InstanceManifest{}, err
 				}
-				tracker, ok := p.(provider.Tracker)
-				if !ok {
-					owned = true
-					break
+				if err := e.adoptDiscoveredChildren(context.Background(), &instance, p, component); err != nil {
+					return protocol.InstanceManifest{}, err
 				}
-				providerPath := strings.TrimPrefix(strings.TrimPrefix(rel, component.Path), "/")
-				if providerPath == "" {
-					providerPath = "."
+				owner = deepestOwner(instance.Components, rel)
+				if owner < 0 {
+					return protocol.InstanceManifest{}, fmt.Errorf("path %q lost its owning Component", rel)
 				}
-				if err := tracker.Add(context.Background(), component, []string{providerPath}); err != nil {
-					return protocol.InstanceManifest{}, fmt.Errorf("add through provider %q: %w", component.Provider, err)
-				}
-				owned = true
-				break
+				component = instance.Components[owner]
 			}
-			if protocol.PathsOverlap(component.Path, rel) {
-				return protocol.InstanceManifest{}, fmt.Errorf("path %q overlaps component %q", rel, component.ID)
+			if err := e.addThroughProvider(context.Background(), instance, component, rel); err != nil {
+				return protocol.InstanceManifest{}, err
 			}
-		}
-		if owned {
+			if err := e.trackParentBoundary(context.Background(), instance, component); err != nil {
+				return protocol.InstanceManifest{}, err
+			}
 			continue
 		}
 		var p provider.Provider
@@ -130,33 +127,154 @@ func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOption
 				return protocol.InstanceManifest{}, err
 			}
 		}
-		for _, component := range instance.Components {
-			if protocol.PathsOverlap(component.Path, componentPath) {
-				return protocol.InstanceManifest{}, fmt.Errorf("discovered root %q overlaps component %q", componentPath, component.ID)
-			}
+		if componentAtPath(instance.Components, componentPath) >= 0 {
+			return protocol.InstanceManifest{}, fmt.Errorf("component root %q is already registered", componentPath)
 		}
-		ref := protocol.ResolvedRef{ID: componentID(componentPath), Path: componentPath, Provider: p.Name(), Contract: p.Contract(), Source: "session", PoolPath: componentTarget, Materialized: componentTarget}
-		if adopter, ok := p.(provider.Adopter); ok {
-			ref, err = adopter.Adopt(context.Background(), ref.ID, componentPath, componentTarget)
-			if err != nil {
-				return protocol.InstanceManifest{}, fmt.Errorf("adopt through provider %q: %w", p.Name(), err)
-			}
+		ref, err := e.adoptComponentTree(context.Background(), &instance, p, componentPath, componentTarget)
+		if err != nil {
+			return protocol.InstanceManifest{}, err
 		}
-		instance.Components = append(instance.Components, ref)
-		if tracker, ok := p.(provider.Tracker); ok {
-			selection := strings.TrimPrefix(strings.TrimPrefix(rel, componentPath), "/")
-			if selection == "" {
-				selection = "."
-			}
-			if err := tracker.Add(context.Background(), ref, []string{selection}); err != nil {
-				return protocol.InstanceManifest{}, fmt.Errorf("add through provider %q: %w", p.Name(), err)
-			}
+		if err := e.addThroughProvider(context.Background(), instance, ref, rel); err != nil {
+			return protocol.InstanceManifest{}, err
 		}
 	}
 	if err := protocol.WriteYAML(instance.Paths.Manifest, instance); err != nil {
 		return protocol.InstanceManifest{}, err
 	}
 	return instance, nil
+}
+
+func deepestOwner(components []protocol.ResolvedRef, path string) int {
+	selected := -1
+	for i, component := range components {
+		if path != component.Path && !strings.HasPrefix(path, component.Path+"/") {
+			continue
+		}
+		if selected < 0 || len(component.Path) > len(components[selected].Path) {
+			selected = i
+		}
+	}
+	return selected
+}
+
+func componentAtPath(components []protocol.ResolvedRef, path string) int {
+	for i, component := range components {
+		if component.Path == path {
+			return i
+		}
+	}
+	return -1
+}
+
+func (e *Engine) adoptComponentTree(ctx context.Context, instance *protocol.InstanceManifest, p provider.Provider, componentPath, componentTarget string) (protocol.ResolvedRef, error) {
+	ref := protocol.ResolvedRef{ID: componentID(componentPath), Path: componentPath, Provider: p.Name(), Contract: p.Contract(), Source: "session", PoolPath: componentTarget, Materialized: componentTarget}
+	if adopter, ok := p.(provider.Adopter); ok {
+		adopted, err := adopter.Adopt(ctx, ref.ID, componentPath, componentTarget)
+		if err != nil {
+			return protocol.ResolvedRef{}, fmt.Errorf("adopt through provider %q: %w", p.Name(), err)
+		}
+		ref = adopted
+	}
+	for _, component := range instance.Components {
+		if component.ID == ref.ID {
+			return protocol.ResolvedRef{}, fmt.Errorf("component id %q is already registered", ref.ID)
+		}
+	}
+	instance.Components = append(instance.Components, ref)
+	if err := e.adoptDiscoveredChildren(ctx, instance, p, ref); err != nil {
+		return protocol.ResolvedRef{}, err
+	}
+	return ref, nil
+}
+
+func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol.InstanceManifest, p provider.Provider, ref protocol.ResolvedRef) error {
+	discoverer, ok := p.(provider.NestedDiscoverer)
+	if !ok {
+		return nil
+	}
+	children, err := discoverer.DiscoverChildren(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("discover nested components through provider %q: %w", p.Name(), err)
+	}
+	for _, relative := range children {
+		cleanRelative := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative)))
+		if relative == "" || cleanRelative != relative || cleanRelative == "." || cleanRelative == ".." || strings.HasPrefix(cleanRelative, "../") || filepath.IsAbs(filepath.FromSlash(relative)) {
+			return fmt.Errorf("provider %q returned unsafe nested root %q", p.Name(), relative)
+		}
+		childPath, err := cleanTrackedPath(ref.Path + "/" + cleanRelative)
+		if err != nil || !pathContains(ref.Path, childPath) {
+			return fmt.Errorf("provider %q returned unsafe nested root %q", p.Name(), relative)
+		}
+		if existing := componentAtPath(instance.Components, childPath); existing >= 0 {
+			child := instance.Components[existing]
+			childProvider, err := e.Providers.Get(child.Provider)
+			if err != nil {
+				return err
+			}
+			if err := e.adoptDiscoveredChildren(ctx, instance, childProvider, child); err != nil {
+				return err
+			}
+			continue
+		}
+		childTarget := filepath.Join(ref.Materialized, filepath.FromSlash(cleanRelative))
+		childProvider, err := e.Providers.Match(ctx, childTarget)
+		if err != nil {
+			return fmt.Errorf("nested component %q: %w", childPath, err)
+		}
+		if _, err := e.adoptComponentTree(ctx, instance, childProvider, childPath, childTarget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) addThroughProvider(ctx context.Context, instance protocol.InstanceManifest, component protocol.ResolvedRef, workspacePath string) error {
+	p, err := e.Providers.Get(component.Provider)
+	if err != nil {
+		return err
+	}
+	tracker, ok := p.(provider.Tracker)
+	if !ok {
+		return nil
+	}
+	component.Children = directResolvedChildren(component, instance.Components, nil)
+	providerPath := strings.TrimPrefix(strings.TrimPrefix(workspacePath, component.Path), "/")
+	if providerPath == "" {
+		providerPath = "."
+	}
+	if err := tracker.Add(ctx, component, []string{providerPath}); err != nil {
+		return fmt.Errorf("add through provider %q: %w", component.Provider, err)
+	}
+	return nil
+}
+
+func (e *Engine) trackParentBoundary(ctx context.Context, instance protocol.InstanceManifest, child protocol.ResolvedRef) error {
+	parentIndex := -1
+	for i, candidate := range instance.Components {
+		if !pathContains(candidate.Path, child.Path) {
+			continue
+		}
+		if parentIndex < 0 || len(candidate.Path) > len(instance.Components[parentIndex].Path) {
+			parentIndex = i
+		}
+	}
+	if parentIndex < 0 {
+		return nil
+	}
+	parent := instance.Components[parentIndex]
+	p, err := e.Providers.Get(parent.Provider)
+	if err != nil {
+		return err
+	}
+	tracker, ok := p.(provider.BoundaryTracker)
+	if !ok {
+		return nil
+	}
+	parent.Children = directResolvedChildren(parent, instance.Components, nil)
+	if err := tracker.TrackChild(ctx, parent, child); err != nil {
+		return fmt.Errorf("track child boundary through provider %q: %w", parent.Provider, err)
+	}
+	return nil
 }
 
 func (e *Engine) discoverProviderRoot(ctx context.Context, workdir, rel, target string) (provider.Provider, string, string, error) {

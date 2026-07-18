@@ -71,6 +71,7 @@ func Validate(a Artifact) error {
 		}
 	}
 	seen := map[string]bool{}
+	paths := map[string]string{}
 	requirements := map[string]bool{}
 	for _, req := range a.Requirements {
 		if !identifier.MatchString(req.ID) || requirements[req.ID] {
@@ -93,11 +94,10 @@ func Validate(a Artifact) error {
 		if err != nil {
 			return fmt.Errorf("ref %q: %w", ref.ID, err)
 		}
-		for _, other := range a.Components {
-			if other.ID != ref.ID && pathsOverlap(resolvedPath, other.Path) {
-				return fmt.Errorf("ref paths %q and %q overlap", ref.Path, other.Path)
-			}
+		if otherID, exists := paths[resolvedPath]; exists {
+			return fmt.Errorf("refs %q and %q use duplicate path %q", otherID, ref.ID, ref.Path)
 		}
+		paths[resolvedPath] = ref.ID
 		if !identifier.MatchString(ref.Provider) {
 			return fmt.Errorf("component %q has invalid provider id %q", ref.ID, ref.Provider)
 		}
@@ -256,10 +256,6 @@ func protocolPath(value string) (string, error) {
 		return "", fmt.Errorf("unsafe ref path %q", value)
 	}
 	return clean, nil
-}
-
-func pathsOverlap(a, b string) bool {
-	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 func ValidIdentifier(value string) bool { return identifier.MatchString(value) }

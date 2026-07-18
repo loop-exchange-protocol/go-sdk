@@ -138,6 +138,21 @@ func TestValidateRejectsNonNormalizedPortablePaths(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsNestedComponentsAndRejectsDuplicateRoots(t *testing.T) {
+	a := validArtifact()
+	child := a.Components[0]
+	child.ID = "dependency"
+	child.Path = "source/deps/dependency"
+	a.Components = append(a.Components, child)
+	if err := Validate(a); err != nil {
+		t.Fatalf("nested Component rejected: %v", err)
+	}
+	a.Components[1].Path = a.Components[0].Path
+	if err := Validate(a); err == nil || !strings.Contains(err.Error(), "duplicate path") {
+		t.Fatalf("duplicate Component root accepted: %v", err)
+	}
+}
+
 func TestValidateRejectsRequirementOrchestrationCycle(t *testing.T) {
 	a := validArtifact()
 	a.Requirements[0].ProvidedBy = "component:source"
