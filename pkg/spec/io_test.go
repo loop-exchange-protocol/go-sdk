@@ -57,6 +57,18 @@ func TestValidateDistributionFieldCombinations(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMirroredRevisionMismatch(t *testing.T) {
+	artifact := validArtifact()
+	artifact.Components[0].Distribution = "mirrored"
+	artifact.Components[0].Embedded = &Embedded{
+		Revision: strings.Repeat("b", 40),
+		Payloads: map[string]Payload{"base": {MediaType: "application/vnd.git.bundle", Digest: "sha256:" + strings.Repeat("c", 64), Size: 1}},
+	}
+	if err := Validate(artifact); err == nil {
+		t.Fatal("mirrored component with mismatched revisions unexpectedly validated")
+	}
+}
+
 func TestReadArtifactRejectsLegacyRuntimeField(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "manifest.yaml")

@@ -10,6 +10,8 @@ e := engine.New(stateRoot, providers...)
 
 Provider authors implement `pkg/provider.Provider`, optionally `Tracker` for native change selection and `Adopter` for taking ownership of existing roots. The normative specification, schemas, and canonical examples live in [`loop-exchange-protocol`](https://github.com/loop-exchange-protocol/loop-exchange-protocol).
 
+The generic Engine API supports `reference`, `embedded`, and `mirrored` as declared by each Provider, and passes the actual distribution, locator, and revision into Plan. Mirrored reference and embedded revisions must match. The exact contract defines safe locators, selected state, and fallback behavior.
+
 ## Verification
 
 ```bash
@@ -19,5 +21,7 @@ cd cmd/lxp && go test -race ./... && go vet ./...
 ```
 
 `cmd/lxp` is a nested module and the official Production MVP composition root. It combines this SDK with `go-provider-git` only. Its public commands are `init/add/status/export/import/inspect/requirements`, and it accepts embedded `.lxpz` Artifacts only. Local `replace` directives support adjacent-repository development and must become released versions for distribution.
+
+Experimental reference and mirrored are consumed through the Engine/Provider API and implementation-repository Harnesses; they do not expand that Production CLI surface.
 
 The current `v1alpha1` release makes no compatibility promise and supports trusted Artifacts only.

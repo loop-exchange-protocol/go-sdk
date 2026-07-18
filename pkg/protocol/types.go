@@ -40,6 +40,7 @@ type ResolvedRef struct {
 	Path         string            `yaml:"path" json:"path"`
 	Provider     string            `yaml:"provider" json:"provider"`
 	Contract     string            `yaml:"contract" json:"contract"`
+	Distribution string            `yaml:"distribution,omitempty" json:"distribution,omitempty"`
 	Config       map[string]any    `yaml:"config,omitempty" json:"config,omitempty"`
 	Source       string            `yaml:"source" json:"source"`
 	Revision     string            `yaml:"revision,omitempty" json:"revision,omitempty"`

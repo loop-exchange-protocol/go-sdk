@@ -85,7 +85,13 @@ func (e *Engine) planArtifact(ctx context.Context, a spec.Artifact) ([]Component
 		if component.Contract != p.Contract() {
 			return nil, fmt.Errorf("component %q requires provider %s@%s; installed contract is %s", component.ID, component.Provider, component.Contract, p.Contract())
 		}
-		ref := protocol.ResolvedRef{ID: component.ID, Description: component.Description, Path: component.Path, Provider: component.Provider, Contract: component.Contract, Config: component.Config, Requires: component.Requires, Metadata: component.Metadata}
+		ref := protocol.ResolvedRef{ID: component.ID, Description: component.Description, Path: component.Path, Provider: component.Provider, Contract: component.Contract, Distribution: component.Distribution, Config: component.Config, Requires: component.Requires, Metadata: component.Metadata}
+		if component.Reference != nil {
+			ref.Source = component.Reference.Locator
+			ref.Revision = component.Reference.Revision
+		} else if component.Embedded != nil {
+			ref.Revision = component.Embedded.Revision
+		}
 		plan, err := p.Plan(ctx, ref)
 		if err != nil {
 			return nil, fmt.Errorf("plan component %q: %w", component.ID, err)

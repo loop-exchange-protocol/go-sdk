@@ -142,6 +142,9 @@ func validateDistribution(component Component) error {
 		if component.Reference == nil || component.Embedded == nil || len(component.Embedded.Payloads) == 0 {
 			return fmt.Errorf("mirrored distribution requires reference and embedded payload")
 		}
+		if component.Reference.Revision != component.Embedded.Revision {
+			return fmt.Errorf("mirrored reference and embedded revisions must match")
+		}
 	default:
 		return fmt.Errorf("unsupported distribution %q", component.Distribution)
 	}

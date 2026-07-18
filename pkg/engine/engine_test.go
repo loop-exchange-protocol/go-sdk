@@ -17,8 +17,18 @@ type fakeProvider struct{}
 
 type failingProvider struct{ fakeProvider }
 
+type planningProvider struct {
+	fakeProvider
+	seen *protocol.ResolvedRef
+}
+
 func (failingProvider) Restore(context.Context, spec.Component, bundle.Store, provider.MaterializeTarget) (protocol.ResolvedRef, error) {
 	return protocol.ResolvedRef{}, fmt.Errorf("restore failed")
+}
+
+func (p planningProvider) Plan(_ context.Context, ref protocol.ResolvedRef) (provider.Plan, error) {
+	*p.seen = ref
+	return provider.Plan{Actions: []string{"inspect distribution-aware plan"}}, nil
 }
 
 func (fakeProvider) Name() string                               { return "fake" }
@@ -64,6 +74,19 @@ func TestPlanBundleUsesOnlyInjectedProvider(t *testing.T) {
 	writeReferenceArtifact(t, mismatchDir, "v2")
 	if _, err := New(filepath.Join(tmp, "mismatch-state"), fakeProvider{}).PlanBundle(context.Background(), mismatchDir); err == nil {
 		t.Fatal("mismatched Provider contract unexpectedly planned")
+	}
+}
+
+func TestPlanBundlePassesDistributionDescriptorToProvider(t *testing.T) {
+	tmp := t.TempDir()
+	artifactDir := filepath.Join(tmp, "artifact.lxp")
+	writeReferenceArtifact(t, artifactDir, "v1")
+	var seen protocol.ResolvedRef
+	if _, err := New(filepath.Join(tmp, "state"), planningProvider{seen: &seen}).PlanBundle(context.Background(), artifactDir); err != nil {
+		t.Fatal(err)
+	}
+	if seen.Distribution != "reference" || seen.Source != "https://example.invalid/fixture" || seen.Revision != "revision" {
+		t.Fatalf("plan descriptor = %#v", seen)
 	}
 }
 
