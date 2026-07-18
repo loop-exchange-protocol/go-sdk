@@ -20,8 +20,8 @@ go vet ./...
 cd cmd/lxp && go test -race ./... && go vet ./...
 ```
 
-`cmd/lxp` 是独立嵌套 module，也是官方 Production MVP composition root：它只组合 SDK 与 `go-provider-git`。公开命令面为 `init/add/status/export/import/inspect/requirements`，并且只接受 embedded `.lxpz` Artifact。开发时使用相邻仓库的 `replace`；发布时必须改为已发布版本。
+`cmd/lxp` 是独立嵌套 module，也是官方 Production MVP composition root：它只组合 SDK 与 `go-provider-git`。公开命令面为 `init/add/status/export/import/inspect/requirements`；`lxp export --distribution` 支持 reference/embedded/mirrored `.lxpz`（默认 embedded），Import 自动读取 Artifact 声明。开发时使用相邻仓库的 `replace`；发布时必须改为已发布版本。
 
-实验 reference/mirrored 通过 Engine/Provider API 和实现仓库 Harness 使用，不会扩展上述 Production CLI surface。
+真实四仓库 Harness 位于 `go-provider-git`，并直接验证上述公开 CLI 的 reference 在线导入、reference 离线失败清理与 mirrored 离线 fallback。
 
 当前版本为 `v1alpha1`，不承诺兼容性，并仅面向可信 Artifact。

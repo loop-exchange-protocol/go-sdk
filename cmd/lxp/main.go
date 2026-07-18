@@ -340,26 +340,50 @@ func validateProductionArtifact(artifact spec.Artifact) error {
 		if component.Provider != "git" || component.Contract != "v1" {
 			return fmt.Errorf("production profile rejects component %q: only git@v1 is supported", component.ID)
 		}
-		if component.Distribution != "embedded" || component.Embedded == nil || component.Reference != nil {
-			return fmt.Errorf("production profile rejects component %q: embedded-only content is required", component.ID)
-		}
-		if !validGitObjectID(component.Embedded.Revision) {
-			return fmt.Errorf("production profile rejects component %q: embedded Git revision must be a full object ID", component.ID)
-		}
-		if len(component.Embedded.Payloads) < 1 || len(component.Embedded.Payloads) > 2 {
-			return fmt.Errorf("production profile rejects component %q: unsupported Git payload roles", component.ID)
-		}
-		base, ok := component.Embedded.Payloads["base"]
-		if !ok || base.MediaType != "application/vnd.git.bundle" {
-			return fmt.Errorf("production profile rejects component %q: Git base bundle is required", component.ID)
-		}
-		for role, payload := range component.Embedded.Payloads {
-			if role == "base" {
-				continue
+		switch component.Distribution {
+		case "reference":
+			if component.Reference == nil || component.Embedded != nil || component.Reference.Subdir != "" || !validGitObjectID(component.Reference.Revision) {
+				return fmt.Errorf("production profile rejects component %q: reference Git revision must be a full object ID", component.ID)
 			}
-			if role != "state" || payload.MediaType != "application/vnd.loop.git-worktree-state.v1+tar" {
-				return fmt.Errorf("production profile rejects component %q: unsupported Git payload role %q", component.ID, role)
+		case "embedded":
+			if component.Embedded == nil || component.Reference != nil || !validGitObjectID(component.Embedded.Revision) {
+				return fmt.Errorf("production profile rejects component %q: embedded Git revision must be a full object ID", component.ID)
 			}
+			if err := validateGitPayloads(component.ID, component.Embedded.Payloads, true); err != nil {
+				return err
+			}
+		case "mirrored":
+			if component.Reference == nil || component.Embedded == nil || component.Reference.Subdir != "" || !validGitObjectID(component.Reference.Revision) || component.Reference.Revision != component.Embedded.Revision {
+				return fmt.Errorf("production profile rejects component %q: mirrored Git revisions must be identical full object IDs", component.ID)
+			}
+			if err := validateGitPayloads(component.ID, component.Embedded.Payloads, false); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("production profile rejects component %q: unsupported distribution %q", component.ID, component.Distribution)
+		}
+	}
+	return nil
+}
+
+func validateGitPayloads(componentID string, payloads map[string]spec.Payload, allowState bool) error {
+	limit := 1
+	if allowState {
+		limit = 2
+	}
+	if len(payloads) < 1 || len(payloads) > limit {
+		return fmt.Errorf("production profile rejects component %q: unsupported Git payload roles", componentID)
+	}
+	base, ok := payloads["base"]
+	if !ok || base.MediaType != "application/vnd.git.bundle" {
+		return fmt.Errorf("production profile rejects component %q: Git base bundle is required", componentID)
+	}
+	for role, payload := range payloads {
+		if role == "base" {
+			continue
+		}
+		if !allowState || role != "state" || payload.MediaType != "application/vnd.loop.git-worktree-state.v1+tar" {
+			return fmt.Errorf("production profile rejects component %q: unsupported Git payload role %q", componentID, role)
 		}
 	}
 	return nil
@@ -396,6 +420,7 @@ func runExport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	root := fs.String("root", "", "protocol state root")
 	sessionID := fs.String("session-id", "", "session id")
+	distribution := fs.String("distribution", "embedded", "embedded, reference, or mirrored")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -404,6 +429,9 @@ func runExport(ctx context.Context, args []string) error {
 	}
 	if err := requireArchivePath(fs.Arg(0)); err != nil {
 		return err
+	}
+	if *distribution != "embedded" && *distribution != "reference" && *distribution != "mirrored" {
+		return fmt.Errorf("unsupported distribution %q", *distribution)
 	}
 	resolvedRoot, resolvedSession, err := resolveSession(*root, *sessionID)
 	if err != nil {
@@ -419,7 +447,7 @@ func runExport(ctx context.Context, args []string) error {
 		Name:         resolvedSession,
 		Version:      version,
 		Out:          fs.Arg(0),
-		Distribution: "embedded",
+		Distribution: *distribution,
 	})
 	if err != nil {
 		return err
@@ -477,7 +505,7 @@ func usage() error {
 Usage:
   lxp init [--session-id work] [WORKDIR]
   lxp import [--session-id work] ARTIFACT.lxpz [WORKDIR]
-  lxp export ARTIFACT.lxpz
+  lxp export [--distribution embedded|reference|mirrored] ARTIFACT.lxpz
   lxp status [--format text|json]
   lxp add [--provider ID@CONTRACT] PATH...
   lxp inspect ARTIFACT.lxpz

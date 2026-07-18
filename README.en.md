@@ -20,8 +20,8 @@ go vet ./...
 cd cmd/lxp && go test -race ./... && go vet ./...
 ```
 
-`cmd/lxp` is a nested module and the official Production MVP composition root. It combines this SDK with `go-provider-git` only. Its public commands are `init/add/status/export/import/inspect/requirements`, and it accepts embedded `.lxpz` Artifacts only. Local `replace` directives support adjacent-repository development and must become released versions for distribution.
+`cmd/lxp` is a nested module and the official Production MVP composition root. It combines this SDK with `go-provider-git` only. Its public commands are `init/add/status/export/import/inspect/requirements`; `lxp export --distribution` supports reference/embedded/mirrored `.lxpz` (default: embedded), and Import reads the Artifact declaration automatically. Local `replace` directives support adjacent-repository development and must become released versions for distribution.
 
-Experimental reference and mirrored are consumed through the Engine/Provider API and implementation-repository Harnesses; they do not expand that Production CLI surface.
+The real four-repository Harness in `go-provider-git` directly verifies online reference Import, offline reference failure/cleanup, and offline mirrored fallback through this public CLI.
 
 The current `v1alpha1` release makes no compatibility promise and supports trusted Artifacts only.

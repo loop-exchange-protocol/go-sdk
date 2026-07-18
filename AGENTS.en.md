@@ -15,4 +15,4 @@ git diff --check
 
 The Engine obtains Providers through explicit injection. Unknown `provider + contract` pairs fail without fallback. Artifacts do not carry Provider executables or local materialization paths. `v1alpha1` makes no compatibility promise and supports trusted Artifacts only.
 
-The official CLI Production Profile injects `git@v1` only, accepts embedded `.lxpz` Artifacts only, and freezes the public surface to `init/add/status/export/import/inspect/requirements`. Provider Plan is internal Import preflight, not a public command.
+The official CLI Production Profile injects `git@v1` only, accepts reference/embedded/mirrored `.lxpz` Artifacts, and freezes the public surface to `init/add/status/export/import/inspect/requirements`. Export selects the form with `--distribution` and defaults to embedded; Import reads the Artifact declaration automatically. Provider Plan is internal Import preflight, not a public command.
