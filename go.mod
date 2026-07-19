@@ -1,4 +1,4 @@
-module github.com/loop-exchange-protocol/go-sdk
+module github.com/loop-exchange-protocol/lxp
 
 go 1.22
 

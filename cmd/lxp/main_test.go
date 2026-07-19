@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/bundle"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	gitprovider "github.com/loop-exchange-protocol/provider-git"
+
+	"github.com/loop-exchange-protocol/lxp/pkg/bundle"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 func TestDirectoryAwareInitAddExportImport(t *testing.T) {
@@ -169,9 +171,9 @@ func TestProductionProfileAcceptsAllGitDistributions(t *testing.T) {
 	revision := strings.Repeat("a", 40)
 	base := spec.Payload{MediaType: "application/vnd.git.bundle"}
 	for _, component := range []spec.Component{
-		{ID: "reference", Provider: "git", Contract: "v1", Distribution: "reference", Reference: &spec.Reference{Locator: "https://example.invalid/repo.git", Revision: revision}},
-		{ID: "embedded", Provider: "git", Contract: "v1", Distribution: "embedded", Embedded: &spec.Embedded{Revision: revision, Payloads: map[string]spec.Payload{"base": base}}},
-		{ID: "mirrored", Provider: "git", Contract: "v1", Distribution: "mirrored", Reference: &spec.Reference{Locator: "https://example.invalid/repo.git", Revision: revision}, Embedded: &spec.Embedded{Revision: revision, Payloads: map[string]spec.Payload{"base": base}}},
+		{ID: "reference", Provider: gitprovider.GitContract, Distribution: "reference", Reference: &spec.Reference{Locator: "https://example.invalid/repo.git", Revision: revision}},
+		{ID: "embedded", Provider: gitprovider.GitContract, Distribution: "embedded", Embedded: &spec.Embedded{Revision: revision, Payloads: map[string]spec.Payload{"base": base}}},
+		{ID: "mirrored", Provider: gitprovider.GitContract, Distribution: "mirrored", Reference: &spec.Reference{Locator: "https://example.invalid/repo.git", Revision: revision}, Embedded: &spec.Embedded{Revision: revision, Payloads: map[string]spec.Payload{"base": base}}},
 	} {
 		if err := validateProductionArtifact(spec.Artifact{Components: []spec.Component{component}}); err != nil {
 			t.Fatalf("%s distribution rejected: %v", component.Distribution, err)
@@ -238,8 +240,12 @@ func TestCLIReferenceAndMirroredJourney(t *testing.T) {
 	if err := run(ctx, []string{"import", referenceArtifact, referenceOffline}); err == nil {
 		t.Fatal("offline reference import unexpectedly succeeded")
 	}
-	if _, err := os.Stat(referenceOffline); !os.IsNotExist(err) {
-		t.Fatalf("failed reference import target was not cleaned: %v", err)
+	retryState, err := protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(referenceOffline, ".lxp", "sessions", "work", "manifest.yaml"))
+	if err != nil {
+		t.Fatalf("failed reference import did not preserve retry state: %v", err)
+	}
+	if retryState.Metadata["import_state"] != "importing" {
+		t.Fatalf("failed reference import state = %q", retryState.Metadata["import_state"])
 	}
 	mirroredOffline := filepath.Join(tmp, "mirrored-offline")
 	if err := run(ctx, []string{"import", mirroredArtifact, mirroredOffline}); err != nil {
@@ -251,6 +257,18 @@ func TestCLIReferenceAndMirroredJourney(t *testing.T) {
 			t.Fatalf("restored %s content = %q, %v", root, content, err)
 		}
 	}
+}
+
+func readBundleArtifact(path string) (spec.Artifact, error) {
+	stage, err := os.MkdirTemp("", "lxp-cli-test-inspect-")
+	if err != nil {
+		return spec.Artifact{}, err
+	}
+	defer os.RemoveAll(stage)
+	if err := bundle.Unpack(path, stage); err != nil {
+		return spec.Artifact{}, err
+	}
+	return spec.ReadArtifact(filepath.Join(stage, "manifest.yaml"))
 }
 
 func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
@@ -366,8 +384,12 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 	if err := run(ctx, []string{"import", artifacts["reference"], offlineReference}); err == nil {
 		t.Fatal("offline nested reference import unexpectedly succeeded")
 	}
-	if _, err := os.Stat(offlineReference); !os.IsNotExist(err) {
-		t.Fatalf("failed nested reference target was not cleaned: %v", err)
+	retryState, err := protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(offlineReference, ".lxp", "sessions", "work", "manifest.yaml"))
+	if err != nil {
+		t.Fatalf("failed nested reference import did not preserve retry state: %v", err)
+	}
+	if retryState.Metadata["import_state"] != "importing" {
+		t.Fatalf("failed nested reference import state = %q", retryState.Metadata["import_state"])
 	}
 	for _, distribution := range []string{"embedded", "mirrored"} {
 		target := filepath.Join(tmp, distribution+"-submodule-offline")
@@ -401,8 +423,7 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 func TestProductionProfileRejectsUnknownGitPayloadRole(t *testing.T) {
 	artifact := spec.Artifact{Components: []spec.Component{{
 		ID:           "source",
-		Provider:     "git",
-		Contract:     "v1",
+		Provider:     gitprovider.GitContract,
 		Distribution: "embedded",
 		Embedded: &spec.Embedded{
 			Revision: strings.Repeat("a", 40),

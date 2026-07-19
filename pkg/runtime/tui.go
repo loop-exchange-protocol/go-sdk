@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 	"golang.org/x/term"
 )
 

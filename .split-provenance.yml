@@ -4,7 +4,8 @@ source:
   commit: 8bb3779cc0e632100c4388a393b9d5741f223982
   tag: split-source-2026-07-16
 split:
-  repository: https://github.com/loop-exchange-protocol/go-sdk.git
+  repository: https://github.com/loop-exchange-protocol/lxp.git
+  former_repository: https://github.com/loop-exchange-protocol/go-sdk.git
   retained:
     - cmd/lxp
     - pkg/bundle

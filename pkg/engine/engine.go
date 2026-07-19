@@ -5,24 +5,104 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/provider"
-	lxpruntime "github.com/loop-exchange-protocol/go-sdk/pkg/runtime"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/extension"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	"github.com/loop-exchange-protocol/lxp/pkg/provider"
+	lxpruntime "github.com/loop-exchange-protocol/lxp/pkg/runtime"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 type Engine struct {
-	Root      string
-	Providers *provider.Registry
+	Root       string
+	Providers  *provider.Registry
+	Checkers   *lxpruntime.Registry
+	Extensions extension.Config
 }
 
 // New constructs an Engine from explicitly supplied providers. The SDK never
 // installs concrete providers implicitly; applications are the composition root.
 func New(root string, providers ...provider.Provider) *Engine {
-	return &Engine{Root: root, Providers: provider.NewRegistry(providers...)}
+	return &Engine{Root: root, Providers: provider.NewRegistry(providers...), Checkers: lxpruntime.DefaultRegistry(), Extensions: extension.Default()}
+}
+
+func NewWithConfig(root string, config extension.Config, checkers *lxpruntime.Registry, providers ...provider.Provider) *Engine {
+	if checkers == nil {
+		checkers = lxpruntime.NewRegistry()
+	}
+	return &Engine{Root: root, Providers: provider.NewRegistry(providers...), Checkers: checkers, Extensions: config}
+}
+
+func (e *Engine) providerFor(contract spec.Contract) (provider.Provider, error) {
+	implementation, err := e.Extensions.Resolve(extension.KindProvider, contract)
+	if err != nil {
+		return nil, err
+	}
+	if implementation.Source != "builtin" {
+		return nil, fmt.Errorf("implementation %s for %s is not installed; this Engine does not auto-install repository extensions", implementation.Package.String(), contract.String())
+	}
+	p, err := e.Providers.Get(contract)
+	if err != nil {
+		return nil, err
+	}
+	if p.Implementation() != implementation.Package {
+		return nil, fmt.Errorf("Provider %s is bound to %s but installed implementation is %s", contract.String(), implementation.Package.String(), p.Implementation().String())
+	}
+	return p, nil
+}
+
+func (e *Engine) checkerFor(contract spec.Contract) (lxpruntime.Checker, error) {
+	implementation, err := e.Extensions.Resolve(extension.KindChecker, contract)
+	if err != nil {
+		return nil, err
+	}
+	if implementation.Source != "builtin" {
+		return nil, fmt.Errorf("implementation %s for %s is not installed; this Engine does not auto-install repository extensions", implementation.Package.String(), contract.String())
+	}
+	checker, err := e.Checkers.Get(contract)
+	if err != nil {
+		return nil, err
+	}
+	if checker.Implementation() != implementation.Package {
+		return nil, fmt.Errorf("Checker %s is bound to %s but installed implementation is %s", contract.String(), implementation.Package.String(), checker.Implementation().String())
+	}
+	return checker, nil
+}
+
+func (e *Engine) ensureProvider(p provider.Provider) error {
+	if p == nil {
+		return fmt.Errorf("no Provider selected")
+	}
+	_, err := e.providerFor(p.Contract())
+	return err
+}
+
+// discoveryProviders validates all configured candidates before invoking any
+// Provider Match hook. Registered but unbound Providers remain inert.
+func (e *Engine) discoveryProviders() ([]provider.Provider, error) {
+	installed, err := e.Providers.Providers()
+	if err != nil {
+		return nil, err
+	}
+	eligible := make([]provider.Provider, 0, len(installed))
+	for _, candidate := range installed {
+		implementation, bound, err := e.Extensions.Lookup(extension.KindProvider, candidate.Contract())
+		if err != nil {
+			return nil, err
+		}
+		if !bound {
+			continue
+		}
+		if implementation.Source != "builtin" {
+			return nil, fmt.Errorf("implementation %s for %s is not installed; this Engine does not auto-install repository extensions", implementation.Package.String(), candidate.Contract().String())
+		}
+		if candidate.Implementation() != implementation.Package {
+			return nil, fmt.Errorf("Provider %s is bound to %s but installed implementation is %s", candidate.Contract().String(), implementation.Package.String(), candidate.Implementation().String())
+		}
+		eligible = append(eligible, candidate)
+	}
+	return eligible, nil
 }
 
 func (e *Engine) Init(ctx context.Context, sessionID string) (protocol.InstanceManifest, error) {
@@ -81,81 +161,4 @@ func (e *Engine) readInstance(sessionID string) (protocol.InstanceManifest, erro
 		return protocol.InstanceManifest{}, fmt.Errorf("--session-id is required")
 	}
 	return protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(e.Root, "sessions", sessionID, "manifest.yaml"))
-}
-
-func environmentRequirements(requirements []spec.Requirement) []spec.Requirement {
-	out := make([]spec.Requirement, 0, len(requirements))
-	for _, requirement := range requirements {
-		if requirement.ProvidedBy == "" || requirement.ProvidedBy == "environment" {
-			out = append(out, requirement)
-		}
-	}
-	return out
-}
-
-func (e *Engine) activateComponents(ctx context.Context, components []protocol.ResolvedRef, requirements []spec.Requirement, existing []spec.RuntimeLock, opts lxpruntime.Options) ([]spec.RuntimeLock, error) {
-	consumed := map[string]bool{}
-	for _, component := range components {
-		for _, requirement := range component.Requires {
-			consumed[requirement] = true
-		}
-	}
-	ready := map[string]bool{}
-	for _, lock := range existing {
-		ready[lock.ID] = lock.Status == "ready"
-	}
-	provided := map[string][]spec.Requirement{}
-	for _, requirement := range requirements {
-		if strings.HasPrefix(requirement.ProvidedBy, "component:") {
-			id := strings.TrimPrefix(requirement.ProvidedBy, "component:")
-			provided[id] = append(provided[id], requirement)
-		}
-	}
-	activated := map[string]bool{}
-	var locks []spec.RuntimeLock
-	for len(activated) < len(components) {
-		progress := false
-		for _, component := range components {
-			if activated[component.ID] {
-				continue
-			}
-			canActivate := true
-			for _, requirement := range component.Requires {
-				if !ready[requirement] {
-					canActivate = false
-					break
-				}
-			}
-			if !canActivate {
-				continue
-			}
-			p, err := e.Providers.Get(component.Provider)
-			if err != nil {
-				return nil, err
-			}
-			if err := p.Activate(ctx, component); err != nil {
-				return nil, fmt.Errorf("activate component %q: %w", component.ID, err)
-			}
-			activated[component.ID] = true
-			progress = true
-			if checks := provided[component.ID]; len(checks) > 0 {
-				required := map[string]bool{}
-				for _, check := range checks {
-					required[check.ID] = consumed[check.ID]
-				}
-				checked, err := lxpruntime.Resolve(ctx, checks, required, opts)
-				if err != nil {
-					return nil, err
-				}
-				locks = append(locks, checked...)
-				for _, lock := range checked {
-					ready[lock.ID] = lock.Status == "ready"
-				}
-			}
-		}
-		if !progress {
-			return nil, fmt.Errorf("component activation is blocked by unsatisfied requirements")
-		}
-	}
-	return locks, nil
 }

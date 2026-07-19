@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 func TestChecklistGuidesAndApprovesExecutable(t *testing.T) {
-	requirements := []spec.Requirement{{ID: "git-cli", Check: spec.Check{Type: "executable", Command: "git", Args: []string{"--version"}}}}
+	requirements := []spec.Requirement{{ID: "git-cli", Check: spec.Check{Checker: ExecutableContract, Config: map[string]any{"command": "git", "args": []string{"--version"}}}}}
 	required := map[string]bool{"git-cli": true}
 	items := Check(context.Background(), requirements, required, Options{})
 	if len(items) != 1 || items[0].Action != "approve-executable" || !strings.Contains(items[0].Prompt, "Install") {
@@ -29,7 +29,7 @@ func TestChecklistGuidesAndApprovesExecutable(t *testing.T) {
 }
 
 func TestChecklistPreservesArtifactPromptSource(t *testing.T) {
-	requirements := []spec.Requirement{{ID: "token", Description: "Identity used by the project API", Prompt: "Obtain the reviewed project token, bind it, then refresh.", Check: spec.Check{Type: "credential", Accepts: []string{"bearer-token"}}}}
+	requirements := []spec.Requirement{{ID: "token", Description: "Identity used by the project API", Prompt: "Obtain the reviewed project token, bind it, then refresh.", Check: spec.Check{Checker: CredentialContract, Config: map[string]any{"accepts": []string{"bearer-token"}}}}}
 	items := Check(context.Background(), requirements, map[string]bool{"token": true}, Options{})
 	if len(items) != 1 || items[0].Description != requirements[0].Description || items[0].Prompt != requirements[0].Prompt || items[0].PromptSource != "artifact" {
 		t.Fatalf("artifact prompt was not preserved: %+v", items)
@@ -37,7 +37,7 @@ func TestChecklistPreservesArtifactPromptSource(t *testing.T) {
 }
 
 func TestOneTimeSecretIsNotPersisted(t *testing.T) {
-	requirements := []spec.Requirement{{ID: "token", Check: spec.Check{Type: "credential", Accepts: []string{"bearer-token"}}}}
+	requirements := []spec.Requirement{{ID: "token", Check: spec.Check{Checker: CredentialContract, Config: map[string]any{"accepts": []string{"bearer-token"}}}}}
 	var out bytes.Buffer
 	opts, err := RunChecklist(context.Background(), requirements, map[string]bool{"token": true}, Options{}, strings.NewReader("s\ntoken\nvalue\n"), &out)
 	if err != nil {

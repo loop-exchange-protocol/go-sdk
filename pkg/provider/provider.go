@@ -3,57 +3,44 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/bundle"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/bundle"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
-type MaterializeTarget struct {
+type ApplyTarget struct {
 	Workdir  string
 	Path     string
 	Children []protocol.ChildComponent
 }
 
+// Provider reconciles one globally identified content contract. Validate must
+// not write Component content. Apply must be idempotent and retryable.
 type Provider interface {
-	Name() string
-	Contract() string
+	Contract() spec.Contract
+	Implementation() spec.Contract
 	Match(ctx context.Context, path string) (int, error)
-	Plan(ctx context.Context, ref protocol.ResolvedRef) (Plan, error)
 	Distributions() []string
-	Resolve(ctx context.Context, ref protocol.RefSpec) (protocol.ResolvedRef, error)
-	Materialize(ctx context.Context, ref protocol.ResolvedRef, target MaterializeTarget) (protocol.ResolvedRef, error)
+	Validate(ctx context.Context, component spec.Component, store bundle.Store, target ApplyTarget) error
+	Apply(ctx context.Context, component spec.Component, store bundle.Store, target ApplyTarget) (protocol.ResolvedRef, error)
 	ExportComponent(ctx context.Context, ref protocol.ResolvedRef, mode string, store bundle.Store) (spec.Component, error)
-	Restore(ctx context.Context, component spec.Component, store bundle.Store, target MaterializeTarget) (protocol.ResolvedRef, error)
-	Activate(ctx context.Context, component protocol.ResolvedRef) error
-}
-
-type Plan struct {
-	Actions      []string `json:"actions"`
-	Requirements []string `json:"requirements,omitempty"`
 }
 
 type Adopter interface {
 	Adopt(ctx context.Context, id, path, materialized string) (protocol.ResolvedRef, error)
 }
 
-// Tracker is implemented by providers that own native change-selection
-// semantics. Paths are relative to the component root.
 type Tracker interface {
 	Add(ctx context.Context, ref protocol.ResolvedRef, paths []string) error
 	Status(ctx context.Context, ref protocol.ResolvedRef) ([]Change, error)
 }
 
-// NestedDiscoverer prepares and reports Provider-native direct child roots.
-// Core registers each returned root as a nested Component and recursively asks
-// its owning Provider. Any preparation side effects are contract-defined.
 type NestedDiscoverer interface {
 	DiscoverChildren(ctx context.Context, ref protocol.ResolvedRef) ([]string, error)
 }
 
-// BoundaryTracker updates Provider-native attachment metadata after a nested
-// child is selected. Providers must ignore children that are simple ownership
-// carve-outs rather than native attachments.
 type BoundaryTracker interface {
 	TrackChild(ctx context.Context, parent, child protocol.ResolvedRef) error
 }
@@ -64,7 +51,8 @@ type Change struct {
 }
 
 type Registry struct {
-	providers map[string]Provider
+	providers       map[string]Provider
+	registrationErr error
 }
 
 func NewRegistry(providers ...Provider) *Registry {
@@ -76,15 +64,52 @@ func NewRegistry(providers ...Provider) *Registry {
 }
 
 func (r *Registry) Register(p Provider) {
-	r.providers[p.Name()] = p
+	if p == nil {
+		r.registrationErr = fmt.Errorf("cannot register a nil Provider")
+		return
+	}
+	contract := p.Contract()
+	implementation := p.Implementation()
+	if !contract.Valid() || !implementation.Valid() {
+		r.registrationErr = fmt.Errorf("invalid Provider registration %s -> %s", contract.String(), implementation.String())
+		return
+	}
+	key := contract.String()
+	if _, exists := r.providers[key]; exists {
+		r.registrationErr = fmt.Errorf("duplicate Provider contract %s", key)
+		return
+	}
+	r.providers[key] = p
 }
 
-func (r *Registry) Get(name string) (Provider, error) {
-	p, ok := r.providers[name]
+func (r *Registry) Get(contract spec.Contract) (Provider, error) {
+	if r.registrationErr != nil {
+		return nil, r.registrationErr
+	}
+	p, ok := r.providers[contract.String()]
 	if !ok {
-		return nil, fmt.Errorf("unsupported provider %q", name)
+		return nil, fmt.Errorf("unsupported provider contract %s", contract.String())
 	}
 	return p, nil
+}
+
+// Providers returns registered Providers in stable contract order without
+// invoking Provider code. Callers can filter configuration bindings before
+// running discovery hooks such as Match.
+func (r *Registry) Providers() ([]Provider, error) {
+	if r.registrationErr != nil {
+		return nil, r.registrationErr
+	}
+	keys := make([]string, 0, len(r.providers))
+	for key := range r.providers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]Provider, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, r.providers[key])
+	}
+	return out, nil
 }
 
 func (r *Registry) Match(ctx context.Context, path string) (Provider, error) {
@@ -96,13 +121,16 @@ func (r *Registry) Match(ctx context.Context, path string) (Provider, error) {
 }
 
 func (r *Registry) MatchScore(ctx context.Context, path string) (Provider, int, error) {
+	if r.registrationErr != nil {
+		return nil, 0, r.registrationErr
+	}
 	var selected Provider
 	best := 0
 	matches := 0
 	for _, p := range r.providers {
 		score, err := p.Match(ctx, path)
 		if err != nil {
-			return nil, 0, fmt.Errorf("match provider %q: %w", p.Name(), err)
+			return nil, 0, fmt.Errorf("match provider %s: %w", p.Contract().String(), err)
 		}
 		if score > best {
 			selected, best, matches = p, score, 1

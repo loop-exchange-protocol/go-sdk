@@ -27,12 +27,19 @@ type Payload struct {
 	Size      int64  `yaml:"size" json:"size"`
 }
 
+// Contract is a globally unique, language-independent extension contract.
+// Namespace is a DNS name controlled by the contract maintainer.
+type Contract struct {
+	Namespace string `yaml:"namespace" json:"namespace"`
+	Name      string `yaml:"name" json:"name"`
+	Version   string `yaml:"version" json:"version"`
+}
+
 type Component struct {
 	ID           string            `yaml:"id" json:"id"`
 	Description  string            `yaml:"description,omitempty" json:"description,omitempty"`
 	Path         string            `yaml:"path" json:"path"`
-	Provider     string            `yaml:"provider" json:"provider"`
-	Contract     string            `yaml:"contract" json:"contract"`
+	Provider     Contract          `yaml:"provider" json:"provider"`
 	Config       map[string]any    `yaml:"config,omitempty" json:"config,omitempty"`
 	Distribution string            `yaml:"distribution" json:"distribution"`
 	Reference    *Reference        `yaml:"reference,omitempty" json:"reference,omitempty"`
@@ -56,18 +63,12 @@ type Requirement struct {
 	ID          string `yaml:"id" json:"id"`
 	Description string `yaml:"description,omitempty" json:"description,omitempty"`
 	Prompt      string `yaml:"prompt,omitempty" json:"prompt,omitempty"`
-	ProvidedBy  string `yaml:"provided_by,omitempty" json:"provided_by,omitempty"`
 	Check       Check  `yaml:"check" json:"check"`
 }
 
 type Check struct {
-	Type          string            `yaml:"type" json:"type"`
-	Command       string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Args          []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	RequiredTools []string          `yaml:"required_tools,omitempty" json:"required_tools,omitempty"`
-	Accepts       []string          `yaml:"accepts,omitempty" json:"accepts,omitempty"`
-	SecretEnv     map[string]string `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
-	Extensions    map[string]any    `yaml:"-" json:"-"`
+	Checker Contract       `yaml:"checker" json:"checker"`
+	Config  map[string]any `yaml:"config,omitempty" json:"config,omitempty"`
 }
 
 type Provenance struct {
@@ -75,31 +76,3 @@ type Provenance struct {
 	Engine    string `yaml:"engine" json:"engine"`
 	Parent    string `yaml:"parent,omitempty" json:"parent,omitempty"`
 }
-
-type Lock struct {
-	APIVersion   string            `yaml:"api_version" json:"api_version"`
-	Artifact     string            `yaml:"artifact" json:"artifact"`
-	Components   []RefLock         `yaml:"components,omitempty" json:"components,omitempty"`
-	Requirements []RequirementLock `yaml:"requirements,omitempty" json:"requirements,omitempty"`
-}
-
-type RefLock struct {
-	ID           string            `yaml:"id" json:"id"`
-	Path         string            `yaml:"path" json:"path"`
-	Provider     string            `yaml:"provider" json:"provider"`
-	Contract     string            `yaml:"contract" json:"contract"`
-	Distribution string            `yaml:"distribution" json:"distribution"`
-	Revision     string            `yaml:"revision,omitempty" json:"revision,omitempty"`
-	Embedded     map[string]string `yaml:"embedded,omitempty" json:"embedded,omitempty"`
-}
-
-type RequirementLock struct {
-	ID             string `yaml:"id" json:"id"`
-	Provider       string `yaml:"provider" json:"provider"`
-	Status         string `yaml:"status" json:"status"`
-	Implementation string `yaml:"implementation,omitempty" json:"implementation,omitempty"`
-	Version        string `yaml:"version,omitempty" json:"version,omitempty"`
-	ContractDigest string `yaml:"contract_digest,omitempty" json:"contract_digest,omitempty"`
-}
-
-type RuntimeLock = RequirementLock

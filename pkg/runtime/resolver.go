@@ -15,13 +15,102 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 type Options struct {
 	SecretEnv        map[string]string
 	AllowMCP         bool
 	AllowExecutables bool
+}
+
+var (
+	ExecutableContract       = spec.Contract{Namespace: "loop.exchange", Name: "executable", Version: "v1"}
+	MCPContract              = spec.Contract{Namespace: "loop.exchange", Name: "mcp", Version: "v1"}
+	CredentialContract       = spec.Contract{Namespace: "loop.exchange", Name: "credential", Version: "v1"}
+	ExecutableImplementation = spec.Contract{Namespace: "loop.exchange", Name: "checker-executable", Version: "0.1.0-alpha.3"}
+	MCPImplementation        = spec.Contract{Namespace: "loop.exchange", Name: "checker-mcp", Version: "0.1.0-alpha.3"}
+	CredentialImplementation = spec.Contract{Namespace: "loop.exchange", Name: "checker-credential", Version: "0.1.0-alpha.3"}
+)
+
+type Observation struct {
+	ID             string        `yaml:"id" json:"id"`
+	Checker        spec.Contract `yaml:"checker" json:"checker"`
+	Status         string        `yaml:"status" json:"status"`
+	Implementation string        `yaml:"implementation,omitempty" json:"implementation,omitempty"`
+	Version        string        `yaml:"version,omitempty" json:"version,omitempty"`
+	ContractDigest string        `yaml:"contract_digest,omitempty" json:"contract_digest,omitempty"`
+}
+
+type Checker interface {
+	Contract() spec.Contract
+	Implementation() spec.Contract
+	Check(ctx context.Context, requirement spec.Requirement, opts Options) (Observation, error)
+}
+
+type checker struct {
+	contract       spec.Contract
+	implementation spec.Contract
+	check          func(context.Context, spec.Requirement, Options) (Observation, error)
+}
+
+func (c checker) Contract() spec.Contract       { return c.contract }
+func (c checker) Implementation() spec.Contract { return c.implementation }
+func (c checker) Check(ctx context.Context, requirement spec.Requirement, opts Options) (Observation, error) {
+	return c.check(ctx, requirement, opts)
+}
+
+type Registry struct {
+	checkers        map[string]Checker
+	registrationErr error
+}
+
+func NewRegistry(checkers ...Checker) *Registry {
+	r := &Registry{checkers: map[string]Checker{}}
+	for _, c := range checkers {
+		r.Register(c)
+	}
+	return r
+}
+
+func (r *Registry) Register(c Checker) {
+	if c == nil {
+		r.registrationErr = fmt.Errorf("cannot register a nil Checker")
+		return
+	}
+	contract := c.Contract()
+	implementation := c.Implementation()
+	if !contract.Valid() || !implementation.Valid() {
+		r.registrationErr = fmt.Errorf("invalid Checker registration %s -> %s", contract.String(), implementation.String())
+		return
+	}
+	key := contract.String()
+	if _, exists := r.checkers[key]; exists {
+		r.registrationErr = fmt.Errorf("duplicate Checker contract %s", key)
+		return
+	}
+	r.checkers[key] = c
+}
+
+func DefaultRegistry() *Registry {
+	return NewRegistry(
+		checker{contract: CredentialContract, implementation: CredentialImplementation, check: func(_ context.Context, req spec.Requirement, opts Options) (Observation, error) {
+			return resolveCredential(req, opts)
+		}},
+		checker{contract: ExecutableContract, implementation: ExecutableImplementation, check: resolveExecutable},
+		checker{contract: MCPContract, implementation: MCPImplementation, check: resolveMCP},
+	)
+}
+
+func (r *Registry) Get(contract spec.Contract) (Checker, error) {
+	if r.registrationErr != nil {
+		return nil, r.registrationErr
+	}
+	c, ok := r.checkers[contract.String()]
+	if !ok {
+		return nil, fmt.Errorf("unsupported checker contract %s", contract.String())
+	}
+	return c, nil
 }
 
 const (
@@ -55,72 +144,82 @@ func (w *limitedOutput) String() string {
 	return string(w.data)
 }
 
-func Resolve(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts Options) ([]spec.RuntimeLock, error) {
+func Resolve(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts Options) ([]Observation, error) {
+	return DefaultRegistry().Resolve(ctx, requirements, required, opts)
+}
+
+func (r *Registry) Resolve(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts Options) ([]Observation, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	locks := make([]spec.RuntimeLock, 0, len(requirements))
+	observations := make([]Observation, 0, len(requirements))
 	for _, req := range requirements {
-		var lock spec.RuntimeLock
-		var err error
-		switch req.Check.Type {
-		case "credential":
-			lock, err = resolveCredential(req, opts)
-		case "executable":
-			if !opts.AllowExecutables {
-				err = fmt.Errorf("executable probes are disabled by import policy")
-			} else {
-				lock, err = resolveExecutable(ctx, req)
+		c, err := r.Get(req.Check.Checker)
+		if err == nil {
+			switch req.Check.Checker {
+			case ExecutableContract:
+				if !opts.AllowExecutables {
+					err = fmt.Errorf("executable probes are disabled by import policy")
+				}
+			case MCPContract:
+				if !opts.AllowMCP {
+					err = fmt.Errorf("MCP execution is disabled by import policy")
+				}
 			}
-		case "mcp":
-			if !opts.AllowMCP {
-				err = fmt.Errorf("MCP execution is disabled by import policy")
-			} else {
-				lock, err = resolveMCP(ctx, req, opts)
-			}
-		default:
-			err = fmt.Errorf("unsupported check type %q", req.Check.Type)
+		}
+		var observation Observation
+		if err == nil {
+			observation, err = c.Check(ctx, req, opts)
 		}
 		if err != nil {
 			if required[req.ID] {
 				return nil, fmt.Errorf("requirement %q: %w", req.ID, err)
 			}
-			locks = append(locks, spec.RuntimeLock{ID: req.ID, Provider: req.Check.Type, Status: "unavailable"})
+			observations = append(observations, Observation{ID: req.ID, Checker: req.Check.Checker, Status: "unavailable"})
 			continue
 		}
-		locks = append(locks, lock)
+		observations = append(observations, observation)
 	}
-	return locks, nil
+	return observations, nil
 }
 
-func resolveCredential(req spec.Requirement, opts Options) (spec.RuntimeLock, error) {
-	for _, scheme := range req.Check.Accepts {
+func resolveCredential(req spec.Requirement, opts Options) (Observation, error) {
+	accepts, err := configStrings(req.Check.Config, "accepts")
+	if err != nil || len(accepts) == 0 {
+		return Observation{}, fmt.Errorf("credential checker requires non-empty config.accepts")
+	}
+	for _, scheme := range accepts {
 		switch scheme {
 		case "ssh-agent":
 			if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 				if _, err := os.Stat(sock); err == nil {
-					return spec.RuntimeLock{ID: req.ID, Provider: "credential", Status: "ready", Implementation: "ssh-agent"}, nil
+					return Observation{ID: req.ID, Checker: req.Check.Checker, Status: "ready", Implementation: "ssh-agent"}, nil
 				}
 			}
 		case "environment", "bearer-token":
 			if envName := opts.SecretEnv[req.ID]; envName != "" && os.Getenv(envName) != "" {
-				return spec.RuntimeLock{ID: req.ID, Provider: "credential", Status: "ready", Implementation: scheme}, nil
+				return Observation{ID: req.ID, Checker: req.Check.Checker, Status: "ready", Implementation: scheme}, nil
 			}
+		default:
+			return Observation{}, fmt.Errorf("unsupported credential scheme %q", scheme)
 		}
 	}
-	return spec.RuntimeLock{}, fmt.Errorf("no accepted binding scheme is available")
+	return Observation{}, fmt.Errorf("no accepted binding scheme is available")
 }
 
-func resolveExecutable(ctx context.Context, req spec.Requirement) (spec.RuntimeLock, error) {
-	command := req.Check.Command
+func resolveExecutable(ctx context.Context, req spec.Requirement, _ Options) (Observation, error) {
+	command, _ := configString(req.Check.Config, "command")
 	if command == "" || strings.ContainsAny(command, `/\\`) {
-		return spec.RuntimeLock{}, fmt.Errorf("command must be a bare executable name")
+		return Observation{}, fmt.Errorf("command must be a bare executable name")
 	}
 	path, err := exec.LookPath(command)
 	if err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
-	args := req.Check.Args
+	args, err := configStrings(req.Check.Config, "args")
+	if err != nil {
+		return Observation{}, err
+	}
 	if len(args) == 0 {
 		args = []string{"--version"}
 	}
@@ -134,32 +233,36 @@ func resolveExecutable(ctx context.Context, req spec.Requirement) (spec.RuntimeL
 	err = cmd.Run()
 	if err != nil {
 		if probeCtx.Err() != nil {
-			return spec.RuntimeLock{}, fmt.Errorf("probe failed: %w", probeCtx.Err())
+			return Observation{}, fmt.Errorf("probe failed: %w", probeCtx.Err())
 		}
-		return spec.RuntimeLock{}, fmt.Errorf("probe failed: %w", err)
+		return Observation{}, fmt.Errorf("probe failed: %w", err)
 	}
 	version := strings.TrimSpace(out.String())
 	if len(version) > 256 {
 		version = version[:256]
 	}
-	return spec.RuntimeLock{ID: req.ID, Provider: req.Check.Type, Status: "ready", Implementation: path, Version: version}, nil
+	return Observation{ID: req.ID, Checker: req.Check.Checker, Status: "ready", Implementation: path, Version: version}, nil
 }
 
-func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.RuntimeLock, error) {
-	command := req.Check.Command
+func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (Observation, error) {
+	command, _ := configString(req.Check.Config, "command")
 	if command == "" || strings.ContainsAny(command, `/\\`) {
-		return spec.RuntimeLock{}, fmt.Errorf("MCP command must be a bare executable name")
+		return Observation{}, fmt.Errorf("MCP command must be a bare executable name")
 	}
 	path, err := exec.LookPath(command)
 	if err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
+	}
+	args, err := configStrings(req.Check.Config, "args")
+	if err != nil {
+		return Observation{}, err
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, path, req.Check.Args...)
+	cmd := exec.CommandContext(cmdCtx, path, args...)
 	cmd.WaitDelay = externalCommandWaitDelay
 	env := MinimalEnv()
-	if inject := req.Check.SecretEnv; inject != nil {
+	if inject, _ := configStringMap(req.Check.Config, "secret_env"); inject != nil {
 		for slot, target := range inject {
 			source := opts.SecretEnv[slot]
 			if target != "" && source != "" {
@@ -170,15 +273,15 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.R
 	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	defer func() {
 		_ = stdin.Close()
@@ -192,18 +295,18 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.R
 	dec := bufio.NewScanner(stdout)
 	dec.Buffer(make([]byte, 64<<10), maxMCPMessageBytes)
 	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "lxp", "version": "0.1.0"}}}); err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	if _, err := scanResponse(cmdCtx, dec, stdout, 1); err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized", "params": map[string]any{}})
 	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}}); err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	result, err := scanResponse(cmdCtx, dec, stdout, 2)
 	if err != nil {
-		return spec.RuntimeLock{}, err
+		return Observation{}, err
 	}
 	canonical, _ := json.Marshal(result)
 	sum := sha256.Sum256(canonical)
@@ -219,12 +322,74 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.R
 			}
 		}
 	}
-	for _, name := range req.Check.RequiredTools {
+	requiredTools, err := configStrings(req.Check.Config, "required_tools")
+	if err != nil {
+		return Observation{}, err
+	}
+	for _, name := range requiredTools {
 		if !available[name] {
-			return spec.RuntimeLock{}, fmt.Errorf("required MCP tool %q is missing", name)
+			return Observation{}, fmt.Errorf("required MCP tool %q is missing", name)
 		}
 	}
-	return spec.RuntimeLock{ID: req.ID, Provider: req.Check.Type, Status: "ready", Implementation: path, ContractDigest: "sha256:" + hex.EncodeToString(sum[:])}, nil
+	return Observation{ID: req.ID, Checker: req.Check.Checker, Status: "ready", Implementation: path, ContractDigest: "sha256:" + hex.EncodeToString(sum[:])}, nil
+}
+
+func configString(config map[string]any, key string) (string, error) {
+	value, ok := config[key]
+	if !ok {
+		return "", nil
+	}
+	out, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("config.%s must be a string", key)
+	}
+	return out, nil
+}
+
+func configStrings(config map[string]any, key string) ([]string, error) {
+	value, ok := config[key]
+	if !ok {
+		return nil, nil
+	}
+	if stringsValue, ok := value.([]string); ok {
+		return stringsValue, nil
+	}
+	list, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("config.%s must be a string array", key)
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		text, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("config.%s must be a string array", key)
+		}
+		out = append(out, text)
+	}
+	return out, nil
+}
+
+func configStringMap(config map[string]any, key string) (map[string]string, error) {
+	value, ok := config[key]
+	if !ok {
+		return nil, nil
+	}
+	if stringsValue, ok := value.(map[string]string); ok {
+		return stringsValue, nil
+	}
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("config.%s must be a string map", key)
+	}
+	out := make(map[string]string, len(mapping))
+	for name, item := range mapping {
+		text, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("config.%s must be a string map", key)
+		}
+		out[name] = text
+	}
+	return out, nil
 }
 
 type scanResult struct {

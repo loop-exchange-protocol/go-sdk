@@ -16,7 +16,9 @@ id: strict
 paths: {session_dir: /tmp/session, workdir: /tmp/work, manifest: /tmp/session/manifest.yaml}
 requirements:
   - id: git-cli
-    check: {type: executable, command: git}
+    check:
+      checker: {namespace: loop.exchange, name: executable, version: v1}
+      config: {command: git}
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}

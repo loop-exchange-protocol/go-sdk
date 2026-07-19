@@ -15,11 +15,11 @@ func validArtifact() Artifact {
 			Namespace: "test", Name: "artifact", Version: "1.0.0",
 		},
 		Components: []Component{{
-			ID: "source", Path: "source", Provider: "git", Contract: "v1", Distribution: "reference",
+			ID: "source", Path: "source", Provider: Contract{Namespace: "loop.exchange", Name: "git", Version: "v1"}, Distribution: "reference",
 			Reference: &Reference{Locator: "https://example.invalid/repo.git", Revision: strings.Repeat("a", 40)},
 			Requires:  []string{"git-cli"},
 		}},
-		Requirements: []Requirement{{ID: "git-cli", Check: Check{Type: "executable", Command: "git", Args: []string{"--version"}}}},
+		Requirements: []Requirement{{ID: "git-cli", Check: Check{Checker: Contract{Namespace: "loop.exchange", Name: "executable", Version: "v1"}, Config: map[string]any{"command": "git", "args": []string{"--version"}}}}},
 		Provenance:   Provenance{CreatedAt: "2026-07-11T00:00:00Z", Engine: "lxp/test"},
 	}
 }
@@ -86,6 +86,28 @@ provenance: {created_at: 2026-07-11T00:00:00Z, engine: test}
 	}
 }
 
+func TestReadArtifactRejectsMultipleYAMLDocuments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.yaml")
+	if err := Write(path, validArtifact()); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("---\nkind: HiddenDocument\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadArtifact(path); err == nil || !strings.Contains(err.Error(), "exactly one YAML document") {
+		t.Fatalf("expected multiple-document rejection, got %v", err)
+	}
+}
+
 func TestValidateRejectsMissingRequirementReference(t *testing.T) {
 	a := validArtifact()
 	a.Components[0].Requires = []string{"missing"}
@@ -96,7 +118,7 @@ func TestValidateRejectsMissingRequirementReference(t *testing.T) {
 
 func TestValidateRejectsInlineCredentialMaterial(t *testing.T) {
 	a := validArtifact()
-	a.Requirements[0] = Requirement{ID: "token", Check: Check{Type: "credential", Accepts: []string{"environment"}, Extensions: map[string]any{"api_token": "secret"}}}
+	a.Requirements[0] = Requirement{ID: "token", Check: Check{Checker: Contract{Namespace: "loop.exchange", Name: "credential", Version: "v1"}, Config: map[string]any{"accepts": []string{"environment"}, "api_token": "secret"}}}
 	if err := Validate(a); err == nil {
 		t.Fatal("expected inline credential material rejection")
 	}
@@ -153,10 +175,12 @@ func TestValidateAcceptsNestedComponentsAndRejectsDuplicateRoots(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsRequirementOrchestrationCycle(t *testing.T) {
-	a := validArtifact()
-	a.Requirements[0].ProvidedBy = "component:source"
-	if err := Validate(a); err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("expected orchestration cycle rejection, got %v", err)
+func TestParseContractRequiresGlobalNamespace(t *testing.T) {
+	contract, err := ParseContract("loop.exchange:git:v1")
+	if err != nil || contract.String() != "loop.exchange:git:v1" {
+		t.Fatalf("parse contract = %#v, %v", contract, err)
+	}
+	if _, err := ParseContract("git@v1"); err == nil {
+		t.Fatal("legacy provider identity unexpectedly accepted")
 	}
 }

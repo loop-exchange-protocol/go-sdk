@@ -1,45 +1,33 @@
 package protocol
 
-import "github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+import "github.com/loop-exchange-protocol/lxp/pkg/spec"
 
 type InstanceManifest struct {
-	Kind         string             `yaml:"kind" json:"kind"`
-	APIVersion   string             `yaml:"api_version" json:"api_version"`
-	ID           string             `yaml:"id" json:"id"`
-	Components   []ResolvedRef      `yaml:"components,omitempty" json:"components,omitempty"`
-	Requirements []spec.Requirement `yaml:"requirements,omitempty" json:"requirements,omitempty"`
-	Paths        InstancePaths      `yaml:"paths" json:"paths"`
-	Metadata     map[string]string  `yaml:"metadata,omitempty" json:"metadata,omitempty"`
+	Kind         string                `yaml:"kind" json:"kind"`
+	APIVersion   string                `yaml:"api_version" json:"api_version"`
+	ID           string                `yaml:"id" json:"id"`
+	Components   []ResolvedRef         `yaml:"components,omitempty" json:"components,omitempty"`
+	Requirements []spec.Requirement    `yaml:"requirements,omitempty" json:"requirements,omitempty"`
+	Extensions   []ExtensionResolution `yaml:"extensions,omitempty" json:"extensions,omitempty"`
+	Paths        InstancePaths         `yaml:"paths" json:"paths"`
+	Metadata     map[string]string     `yaml:"metadata,omitempty" json:"metadata,omitempty"`
 }
 
-type RefSpec struct {
-	ID          string            `yaml:"id" json:"id"`
-	Description string            `yaml:"description,omitempty" json:"description,omitempty"`
-	Path        string            `yaml:"path" json:"path"`
-	Provider    string            `yaml:"provider" json:"provider"`
-	Contract    string            `yaml:"contract,omitempty" json:"contract,omitempty"`
-	Config      map[string]any    `yaml:"config,omitempty" json:"config,omitempty"`
-	Mode        string            `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Selector    RefSelector       `yaml:"selector" json:"selector"`
-	Metadata    map[string]string `yaml:"metadata,omitempty" json:"metadata,omitempty"`
-	Requires    []string          `yaml:"requires,omitempty" json:"requires,omitempty"`
-}
-
-type RefSelector struct {
-	URL    string   `yaml:"url,omitempty" json:"url,omitempty"`
-	Ref    string   `yaml:"ref,omitempty" json:"ref,omitempty"`
-	Path   string   `yaml:"path,omitempty" json:"path,omitempty"`
-	Tags   []string `yaml:"tags,omitempty" json:"tags,omitempty"`
-	Depth  int      `yaml:"depth,omitempty" json:"depth,omitempty"`
-	Subdir string   `yaml:"subdir,omitempty" json:"subdir,omitempty"`
+// ExtensionResolution pins consumer-local implementation identity for a
+// retryable Import. It is Session state and never portable Artifact content.
+type ExtensionResolution struct {
+	Kind           string        `yaml:"kind" json:"kind"`
+	Contract       spec.Contract `yaml:"contract" json:"contract"`
+	Source         string        `yaml:"source" json:"source"`
+	Implementation spec.Contract `yaml:"implementation" json:"implementation"`
+	Digest         string        `yaml:"digest,omitempty" json:"digest,omitempty"`
 }
 
 type ResolvedRef struct {
 	ID           string            `yaml:"id" json:"id"`
 	Description  string            `yaml:"description,omitempty" json:"description,omitempty"`
 	Path         string            `yaml:"path" json:"path"`
-	Provider     string            `yaml:"provider" json:"provider"`
-	Contract     string            `yaml:"contract" json:"contract"`
+	Provider     spec.Contract     `yaml:"provider" json:"provider"`
 	Distribution string            `yaml:"distribution,omitempty" json:"distribution,omitempty"`
 	Config       map[string]any    `yaml:"config,omitempty" json:"config,omitempty"`
 	Source       string            `yaml:"source" json:"source"`
@@ -57,8 +45,7 @@ type ResolvedRef struct {
 type ChildComponent struct {
 	ID       string
 	Path     string
-	Provider string
-	Contract string
+	Provider spec.Contract
 	Revision string
 }
 

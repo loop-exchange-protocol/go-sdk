@@ -3,6 +3,7 @@ package spec
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +14,28 @@ import (
 )
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var namespace = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`)
 var sha256Digest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func (c Contract) String() string {
+	return c.Namespace + ":" + c.Name + ":" + c.Version
+}
+
+func (c Contract) Valid() bool {
+	return namespace.MatchString(c.Namespace) && identifier.MatchString(c.Name) && identifier.MatchString(c.Version)
+}
+
+func ParseContract(value string) (Contract, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return Contract{}, fmt.Errorf("invalid contract %q; expected NAMESPACE:NAME:VERSION", value)
+	}
+	contract := Contract{Namespace: parts[0], Name: parts[1], Version: parts[2]}
+	if !contract.Valid() {
+		return Contract{}, fmt.Errorf("invalid contract %q; expected DNS namespace and safe name/version", value)
+	}
+	return contract, nil
+}
 
 func ReadArtifact(path string) (Artifact, error) {
 	var out Artifact
@@ -25,6 +47,13 @@ func ReadArtifact(path string) (Artifact, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&out); err != nil {
 		return out, err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return out, fmt.Errorf("manifest must contain exactly one YAML document")
+		}
+		return out, fmt.Errorf("read trailing manifest content: %w", err)
 	}
 	return out, Validate(out)
 }
@@ -98,11 +127,8 @@ func Validate(a Artifact) error {
 			return fmt.Errorf("refs %q and %q use duplicate path %q", otherID, ref.ID, ref.Path)
 		}
 		paths[resolvedPath] = ref.ID
-		if !identifier.MatchString(ref.Provider) {
-			return fmt.Errorf("component %q has invalid provider id %q", ref.ID, ref.Provider)
-		}
-		if !identifier.MatchString(ref.Contract) {
-			return fmt.Errorf("component %q has invalid provider contract %q", ref.ID, ref.Contract)
+		if !ref.Provider.Valid() {
+			return fmt.Errorf("component %q has invalid provider contract %q", ref.ID, ref.Provider.String())
 		}
 		if err := rejectInlineSecrets(ref.Config, "component."+ref.ID+".config"); err != nil {
 			return err
@@ -121,9 +147,6 @@ func Validate(a Artifact) error {
 		if utf8.RuneCountInString(ref.Description) > 2048 {
 			return fmt.Errorf("component %q description exceeds 2048 characters", ref.ID)
 		}
-	}
-	if err := validateOrchestration(a.Components, a.Requirements); err != nil {
-		return err
 	}
 	return nil
 }
@@ -171,28 +194,11 @@ func validateRequirement(req Requirement) error {
 	if utf8.RuneCountInString(req.Description) > 2048 || utf8.RuneCountInString(req.Prompt) > 8192 {
 		return fmt.Errorf("description or prompt exceeds limit")
 	}
-	if req.ProvidedBy != "" && req.ProvidedBy != "environment" && !strings.HasPrefix(req.ProvidedBy, "component:") {
-		return fmt.Errorf("invalid provided_by %q", req.ProvidedBy)
+	if !req.Check.Checker.Valid() {
+		return fmt.Errorf("invalid checker contract %q", req.Check.Checker.String())
 	}
-	if err := rejectInlineSecrets(req.Check.Extensions, "check"); err != nil {
+	if err := rejectInlineSecrets(req.Check.Config, "check.config"); err != nil {
 		return err
-	}
-	switch req.Check.Type {
-	case "executable", "mcp":
-		if req.Check.Command == "" || strings.ContainsAny(req.Check.Command, `/\\`) {
-			return fmt.Errorf("%s check requires a bare command", req.Check.Type)
-		}
-	case "credential":
-		if len(req.Check.Accepts) == 0 {
-			return fmt.Errorf("credential check requires accepted schemes")
-		}
-		for _, scheme := range req.Check.Accepts {
-			if scheme != "ssh-agent" && scheme != "environment" && scheme != "bearer-token" {
-				return fmt.Errorf("unsupported credential scheme %q", scheme)
-			}
-		}
-	default:
-		return fmt.Errorf("unsupported check type %q", req.Check.Type)
 	}
 	return nil
 }
@@ -204,47 +210,15 @@ func ValidateOrchestration(components []Component, requirements []Requirement) e
 }
 
 func validateOrchestration(components []Component, requirements []Requirement) error {
-	componentIDs := map[string]bool{}
-	for _, component := range components {
-		componentIDs[component.ID] = true
-	}
-	graph := map[string][]string{}
+	known := map[string]bool{}
 	for _, requirement := range requirements {
-		if strings.HasPrefix(requirement.ProvidedBy, "component:") {
-			producer := strings.TrimPrefix(requirement.ProvidedBy, "component:")
-			if !componentIDs[producer] {
-				return fmt.Errorf("requirement %q references unknown producer component %q", requirement.ID, producer)
-			}
-			graph["c:"+producer] = append(graph["c:"+producer], "r:"+requirement.ID)
-		}
+		known[requirement.ID] = true
 	}
 	for _, component := range components {
 		for _, requirement := range component.Requires {
-			graph["r:"+requirement] = append(graph["r:"+requirement], "c:"+component.ID)
-		}
-	}
-	visiting, visited := map[string]bool{}, map[string]bool{}
-	var visit func(string) error
-	visit = func(node string) error {
-		if visiting[node] {
-			return fmt.Errorf("requirement orchestration contains cycle at %q", strings.TrimPrefix(strings.TrimPrefix(node, "c:"), "r:"))
-		}
-		if visited[node] {
-			return nil
-		}
-		visiting[node] = true
-		for _, next := range graph[node] {
-			if err := visit(next); err != nil {
-				return err
+			if !known[requirement] {
+				return fmt.Errorf("component %q requires unknown requirement %q", component.ID, requirement)
 			}
-		}
-		visiting[node] = false
-		visited[node] = true
-		return nil
-	}
-	for node := range graph {
-		if err := visit(node); err != nil {
-			return err
 		}
 	}
 	return nil

@@ -8,14 +8,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/bundle"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/provider"
-	lxpruntime "github.com/loop-exchange-protocol/go-sdk/pkg/runtime"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/bundle"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	"github.com/loop-exchange-protocol/lxp/pkg/provider"
+	lxpruntime "github.com/loop-exchange-protocol/lxp/pkg/runtime"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 type ExportOptions struct {
@@ -37,72 +38,126 @@ type BundleImportOptions struct {
 	SecretEnv        map[string]string
 }
 
-type ComponentPlan struct {
-	Component    string   `json:"component"`
-	Provider     string   `json:"provider"`
-	Contract     string   `json:"contract"`
-	Actions      []string `json:"actions"`
-	Requirements []string `json:"requirements,omitempty"`
-}
-
-func (e *Engine) PlanBundle(ctx context.Context, path string) ([]ComponentPlan, error) {
-	stage, err := os.MkdirTemp("", "lxp-plan-")
+// ReadyBundleImport returns a completed same-Artifact Session without resolving
+// extensions or running Checks. A non-ready target is reported with ready=false.
+func (e *Engine) ReadyBundleImport(opts BundleImportOptions) (protocol.InstanceManifest, bool, error) {
+	if !spec.ValidIdentifier(opts.SessionID) {
+		return protocol.InstanceManifest{}, false, fmt.Errorf("invalid session id %q", opts.SessionID)
+	}
+	stage, artifact, manifestDigest, err := e.stageBundle(opts.Bundle)
 	if err != nil {
-		return nil, err
+		return protocol.InstanceManifest{}, false, err
 	}
 	defer os.RemoveAll(stage)
+	workdir := opts.Workdir
+	if workdir == "" {
+		workdir = filepath.Join(e.Root, "sessions", opts.SessionID, "workdir")
+	}
+	workdir, err = protocol.CanonicalPath(workdir)
+	if err != nil {
+		return protocol.InstanceManifest{}, false, err
+	}
+	manifestPath := filepath.Join(e.Root, "sessions", opts.SessionID, "manifest.yaml")
+	existing, _, err := inspectImportTarget(workdir, manifestPath, opts.SessionID, manifestDigest, artifact.Components)
+	if err != nil {
+		return protocol.InstanceManifest{}, false, err
+	}
+	return existing, existing.Metadata["import_state"] == "ready", nil
+}
+
+func (e *Engine) ValidateBundle(ctx context.Context, path string) (spec.Artifact, error) {
+	stage, artifact, _, err := e.stageBundle(path)
+	if err != nil {
+		return spec.Artifact{}, err
+	}
+	defer os.RemoveAll(stage)
+	if err := e.validateExtensions(artifact); err != nil {
+		return spec.Artifact{}, err
+	}
+	store := bundle.Store{Root: stage}
+	for _, component := range sortedArtifact(artifact.Components, true) {
+		p, err := e.providerFor(component.Provider)
+		if err != nil {
+			return spec.Artifact{}, err
+		}
+		target := provider.ApplyTarget{Workdir: filepath.Join(stage, "validation-target"), Path: filepath.Join(stage, "validation-target", filepath.FromSlash(component.Path)), Children: directArtifactChildren(component, artifact.Components)}
+		if err := p.Validate(ctx, component, store, target); err != nil {
+			return spec.Artifact{}, fmt.Errorf("validate component %q: %w", component.ID, err)
+		}
+	}
+	return artifact, nil
+}
+
+func (e *Engine) stageBundle(path string) (string, spec.Artifact, string, error) {
+	stage, err := os.MkdirTemp("", "lxp-import-")
+	if err != nil {
+		return "", spec.Artifact{}, "", err
+	}
+	fail := func(err error) (string, spec.Artifact, string, error) {
+		_ = os.RemoveAll(stage)
+		return "", spec.Artifact{}, "", err
+	}
 	if err := bundle.Unpack(path, stage); err != nil {
-		return nil, err
+		return fail(err)
 	}
-	a, err := spec.ReadArtifact(filepath.Join(stage, "manifest.yaml"))
+	artifact, err := spec.ReadArtifact(filepath.Join(stage, "manifest.yaml"))
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	if err := verifyPayloads(a, bundle.Store{Root: stage}); err != nil {
-		return nil, err
+	if err := validateBundleEnvelope(stage, artifact); err != nil {
+		return fail(err)
 	}
-	lock, err := protocol.ReadYAML[spec.Lock](filepath.Join(stage, "lock.yaml"))
-	if err != nil {
-		return nil, err
+	if err := verifyPayloads(artifact, bundle.Store{Root: stage}); err != nil {
+		return fail(err)
 	}
 	digest, err := fileDigest(filepath.Join(stage, "manifest.yaml"))
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	if err := validateArtifactLock(a, lock, digest); err != nil {
-		return nil, err
-	}
-	return e.planArtifact(ctx, a)
+	return stage, artifact, digest, nil
 }
 
-func (e *Engine) planArtifact(ctx context.Context, a spec.Artifact) ([]ComponentPlan, error) {
-	plans := make([]ComponentPlan, 0, len(a.Components))
-	for _, component := range sortedArtifact(a.Components, true) {
-		p, err := e.Providers.Get(component.Provider)
+func (e *Engine) validateExtensions(artifact spec.Artifact) error {
+	_, err := e.resolveExtensions(artifact)
+	return err
+}
+
+func (e *Engine) resolveExtensions(artifact spec.Artifact) ([]protocol.ExtensionResolution, error) {
+	resolved := map[string]protocol.ExtensionResolution{}
+	for _, component := range artifact.Components {
+		p, err := e.providerFor(component.Provider)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("component %q: %w", component.ID, err)
 		}
-		if component.Contract != p.Contract() {
-			return nil, fmt.Errorf("component %q requires provider %s@%s; installed contract is %s", component.ID, component.Provider, component.Contract, p.Contract())
-		}
-		ref := protocol.ResolvedRef{ID: component.ID, Description: component.Description, Path: component.Path, Provider: component.Provider, Contract: component.Contract, Distribution: component.Distribution, Config: component.Config, Requires: component.Requires, Metadata: component.Metadata}
-		if component.Reference != nil {
-			ref.Source = component.Reference.Locator
-			ref.Revision = component.Reference.Revision
-		} else if component.Embedded != nil {
-			ref.Revision = component.Embedded.Revision
-		}
-		ref.Children = directArtifactChildren(component, a.Components)
-		plan, err := p.Plan(ctx, ref)
-		if err != nil {
-			return nil, fmt.Errorf("plan component %q: %w", component.ID, err)
-		}
-		if len(plan.Actions) == 0 {
-			return nil, fmt.Errorf("provider %s@%s returned an empty plan for component %q", component.Provider, component.Contract, component.ID)
-		}
-		plans = append(plans, ComponentPlan{Component: component.ID, Provider: component.Provider, Contract: component.Contract, Actions: plan.Actions, Requirements: plan.Requirements})
+		implementation, _ := e.Extensions.Resolve("provider", component.Provider)
+		resolved[component.Provider.String()] = protocol.ExtensionResolution{Kind: "provider", Contract: component.Provider, Source: implementation.Source, Implementation: p.Implementation(), Digest: implementation.Digest}
 	}
-	return plans, nil
+	for _, requirement := range artifact.Requirements {
+		checker, err := e.checkerFor(requirement.Check.Checker)
+		if err != nil {
+			return nil, fmt.Errorf("requirement %q: %w", requirement.ID, err)
+		}
+		implementation, _ := e.Extensions.Resolve("checker", requirement.Check.Checker)
+		resolved[requirement.Check.Checker.String()] = protocol.ExtensionResolution{Kind: "checker", Contract: requirement.Check.Checker, Source: implementation.Source, Implementation: checker.Implementation(), Digest: implementation.Digest}
+	}
+	out := make([]protocol.ExtensionResolution, 0, len(resolved))
+	for _, resolution := range resolved {
+		out = append(out, resolution)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Contract.String() < out[j].Contract.String() })
+	return out, nil
+}
+
+func sameExtensionResolutions(a, b []protocol.ExtensionResolution) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Engine) Export(ctx context.Context, opts ExportOptions) (string, error) {
@@ -156,7 +211,7 @@ func (e *Engine) Export(ctx context.Context, opts ExportOptions) (string, error)
 	portableByID := make(map[string]spec.Component, len(instance.Components))
 	revisions := make(map[string]string, len(instance.Components))
 	for _, ref := range sortedResolved(instance.Components, false) {
-		p, err := e.Providers.Get(ref.Provider)
+		p, err := e.providerFor(ref.Provider)
 		if err != nil {
 			return "", err
 		}
@@ -191,25 +246,6 @@ func (e *Engine) Export(ctx context.Context, opts ExportOptions) (string, error)
 	if err != nil {
 		return "", err
 	}
-	lock := spec.Lock{APIVersion: spec.APIVersion, Artifact: manifestDigest}
-	for _, ref := range a.Components {
-		embedded := map[string]string{}
-		if ref.Embedded != nil {
-			for role, payload := range ref.Embedded.Payloads {
-				embedded[role] = payload.Digest
-			}
-		}
-		revision := ""
-		if ref.Reference != nil {
-			revision = ref.Reference.Revision
-		} else if ref.Embedded != nil {
-			revision = ref.Embedded.Revision
-		}
-		lock.Components = append(lock.Components, spec.RefLock{ID: ref.ID, Path: ref.Path, Provider: ref.Provider, Contract: ref.Contract, Distribution: ref.Distribution, Revision: revision, Embedded: embedded})
-	}
-	if err := spec.Write(filepath.Join(stage, "lock.yaml"), lock); err != nil {
-		return "", err
-	}
 	if isArchive {
 		if err := bundle.Pack(stage, opts.Out); err != nil {
 			return "", err
@@ -233,163 +269,195 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 	if !spec.ValidIdentifier(opts.SessionID) {
 		return protocol.InstanceManifest{}, fmt.Errorf("invalid session id %q", opts.SessionID)
 	}
-	cleanupTarget := ""
-	completed := false
-	if opts.Workdir != "" {
-		absWorkdir, err := protocol.CanonicalPath(opts.Workdir)
-		if err != nil {
-			return protocol.InstanceManifest{}, err
-		}
-		opts.Workdir = absWorkdir
-		if _, err := os.Stat(absWorkdir); os.IsNotExist(err) {
-			cleanupTarget = absWorkdir
-		} else if err != nil {
-			return protocol.InstanceManifest{}, err
-		}
-	}
-	defer func() {
-		if !completed && cleanupTarget != "" {
-			_ = os.RemoveAll(cleanupTarget)
-		}
-	}()
-	stage, err := os.MkdirTemp("", "lxp-import-")
+	stage, artifact, manifestDigest, err := e.stageBundle(opts.Bundle)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
 	defer os.RemoveAll(stage)
-	if err := bundle.Unpack(opts.Bundle, stage); err != nil {
-		return protocol.InstanceManifest{}, err
+	workdir := opts.Workdir
+	if workdir == "" {
+		workdir = filepath.Join(e.Root, "sessions", opts.SessionID, "workdir")
 	}
-	a, err := spec.ReadArtifact(filepath.Join(stage, "manifest.yaml"))
+	workdir, err = protocol.CanonicalPath(workdir)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-	lock, err := protocol.ReadYAML[spec.Lock](filepath.Join(stage, "lock.yaml"))
+	sessionDir := filepath.Join(e.Root, "sessions", opts.SessionID)
+	manifestPath := filepath.Join(sessionDir, "manifest.yaml")
+	existing, retry, err := inspectImportTarget(workdir, manifestPath, opts.SessionID, manifestDigest, artifact.Components)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-	manifestDigest, err := fileDigest(filepath.Join(stage, "manifest.yaml"))
+	if existing.Metadata["import_state"] == "ready" {
+		return existing, nil
+	}
+	resolutions, err := e.resolveExtensions(artifact)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-	if err := validateArtifactLock(a, lock, manifestDigest); err != nil {
-		return protocol.InstanceManifest{}, err
+	if retry && !sameExtensionResolutions(existing.Extensions, resolutions) {
+		return protocol.InstanceManifest{}, fmt.Errorf("Import extension resolution changed; retry requires the implementations pinned by the importing Session")
 	}
 	store := bundle.Store{Root: stage}
-	if err := verifyPayloads(a, store); err != nil {
-		return protocol.InstanceManifest{}, err
-	}
-	if _, err := e.planArtifact(ctx, a); err != nil {
-		return protocol.InstanceManifest{}, err
-	}
 	runtimeOptions := lxpruntime.Options{SecretEnv: opts.SecretEnv, AllowMCP: opts.AllowMCP, AllowExecutables: opts.AllowExecutables}
-	runtimeLocks, err := lxpruntime.Resolve(ctx, environmentRequirements(a.Requirements), requiredArtifactRequirements(a.Components), runtimeOptions)
+	observations, err := e.Checkers.Resolve(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), runtimeOptions)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-
-	sessionDir := filepath.Join(e.Root, "sessions", opts.SessionID)
-	if _, err := os.Stat(sessionDir); err == nil {
-		return protocol.InstanceManifest{}, fmt.Errorf("session %q already exists", opts.SessionID)
-	} else if !os.IsNotExist(err) {
-		return protocol.InstanceManifest{}, err
-	}
-	sessionsRoot := filepath.Join(e.Root, "sessions")
-	if err := os.MkdirAll(sessionsRoot, 0o755); err != nil {
-		return protocol.InstanceManifest{}, err
-	}
-	tempSession, err := os.MkdirTemp(sessionsRoot, ".import-"+opts.SessionID+"-")
-	if err != nil {
-		return protocol.InstanceManifest{}, err
-	}
-	defer os.RemoveAll(tempSession)
-	workdir := filepath.Join(tempSession, "workdir")
-	var refs []protocol.ResolvedRef
-	for _, ref := range sortedArtifact(a.Components, true) {
-		target, err := bundle.SafeJoin(workdir, ref.Path)
+	for _, component := range sortedArtifact(artifact.Components, true) {
+		target, err := bundle.SafeJoin(workdir, component.Path)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}
-		var materialized protocol.ResolvedRef
-		p, providerErr := e.Providers.Get(ref.Provider)
-		if providerErr != nil {
-			return protocol.InstanceManifest{}, providerErr
+		p, err := e.providerFor(component.Provider)
+		if err != nil {
+			return protocol.InstanceManifest{}, err
 		}
-		if ref.Contract != p.Contract() {
-			return protocol.InstanceManifest{}, fmt.Errorf("component %q requires provider %s@%s; installed contract is %s", ref.ID, ref.Provider, ref.Contract, p.Contract())
-		}
-		children := directArtifactChildren(ref, a.Components)
-		if hasArtifactAncestor(ref, a.Components) {
+		applyTarget := provider.ApplyTarget{Workdir: workdir, Path: target, Children: directArtifactChildren(component, artifact.Components)}
+		if hasArtifactAncestor(component, artifact.Components) {
 			if err := validateNestedTarget(workdir, target); err != nil {
-				return protocol.InstanceManifest{}, fmt.Errorf("import ref %q: %w", ref.ID, err)
+				return protocol.InstanceManifest{}, fmt.Errorf("validate component %q target: %w", component.ID, err)
 			}
 		}
-		materialized, err = p.Restore(ctx, ref, store, provider.MaterializeTarget{Workdir: workdir, Path: target, Children: children})
-		if err != nil {
-			return protocol.InstanceManifest{}, fmt.Errorf("import ref %q: %w", ref.ID, err)
+		if err := p.Validate(ctx, component, store, applyTarget); err != nil {
+			return protocol.InstanceManifest{}, fmt.Errorf("validate component %q: %w", component.ID, err)
 		}
-		refs = append(refs, materialized)
 	}
-	activationLocks, err := e.activateComponents(ctx, refs, a.Requirements, runtimeLocks, runtimeOptions)
-	if err != nil {
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-	runtimeLocks = append(runtimeLocks, activationLocks...)
-	if err := os.MkdirAll(filepath.Join(workdir, ".loop"), 0o755); err != nil {
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-	if err := spec.Write(filepath.Join(workdir, ".loop", "context.yaml"), a); err != nil {
-		return protocol.InstanceManifest{}, err
-	}
-	if err := spec.Write(filepath.Join(workdir, ".loop", "requirements.lock.yaml"), spec.Lock{APIVersion: spec.APIVersion, Requirements: runtimeLocks}); err != nil {
-		return protocol.InstanceManifest{}, err
-	}
-	oldWorkdir := workdir
-	if opts.Workdir == "" {
-		if err := os.Rename(tempSession, sessionDir); err != nil {
+	instance := existing
+	if !retry {
+		instance = protocol.InstanceManifest{Kind: "LoopSessionInstance", APIVersion: spec.APIVersion, ID: opts.SessionID, Requirements: artifact.Requirements, Extensions: resolutions, Paths: protocol.InstancePaths{SessionDir: sessionDir, Workdir: workdir, Manifest: manifestPath}, Metadata: map[string]string{"artifact": artifact.Coordinates.Namespace + ":" + artifact.Coordinates.Name + ":" + artifact.Coordinates.Version, "artifact_digest": manifestDigest, "parent_artifact": manifestDigest, "import_state": "importing"}}
+		if err := protocol.WriteYAML(manifestPath, instance); err != nil {
 			return protocol.InstanceManifest{}, err
 		}
-		workdir = filepath.Join(sessionDir, "workdir")
-	} else {
-		workdir = opts.Workdir
-		if err := os.MkdirAll(workdir, 0o755); err != nil {
-			return protocol.InstanceManifest{}, err
+	}
+	if err := spec.Write(filepath.Join(sessionDir, "requirements.state.yaml"), map[string]any{"api_version": spec.APIVersion, "kind": "RequirementState", "observations": observations}); err != nil {
+		return protocol.InstanceManifest{}, err
+	}
+	for _, component := range sortedArtifact(artifact.Components, true) {
+		if observedComponentComplete(instance.Components, component) {
+			continue
 		}
-		entries, err := os.ReadDir(workdir)
+		target, _ := bundle.SafeJoin(workdir, component.Path)
+		p, err := e.providerFor(component.Provider)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}
-		for _, entry := range entries {
-			if entry.Name() != ".lxp" {
-				return protocol.InstanceManifest{}, fmt.Errorf("import target %q is not empty", workdir)
-			}
-		}
-		materializedEntries, err := os.ReadDir(oldWorkdir)
+		observed, err := p.Apply(ctx, component, store, provider.ApplyTarget{Workdir: workdir, Path: target, Children: directArtifactChildren(component, artifact.Components)})
 		if err != nil {
-			return protocol.InstanceManifest{}, err
+			return protocol.InstanceManifest{}, fmt.Errorf("apply component %q: %w; retry the same import to continue", component.ID, err)
 		}
-		for _, entry := range materializedEntries {
-			if err := os.Rename(filepath.Join(oldWorkdir, entry.Name()), filepath.Join(workdir, entry.Name())); err != nil {
-				return protocol.InstanceManifest{}, err
-			}
-		}
-		if err := os.Remove(oldWorkdir); err != nil {
-			return protocol.InstanceManifest{}, err
-		}
-		if err := os.Rename(tempSession, sessionDir); err != nil {
+		instance.Components = replaceObserved(instance.Components, observed)
+		if err := protocol.WriteYAML(manifestPath, instance); err != nil {
 			return protocol.InstanceManifest{}, err
 		}
 	}
-	for i := range refs {
-		refs[i].PoolPath = strings.Replace(refs[i].PoolPath, oldWorkdir, workdir, 1)
-		refs[i].Materialized = strings.Replace(refs[i].Materialized, oldWorkdir, workdir, 1)
-	}
-	instance := protocol.InstanceManifest{Kind: "LoopSessionInstance", APIVersion: spec.APIVersion, ID: opts.SessionID, Components: refs, Requirements: a.Requirements, Paths: protocol.InstancePaths{SessionDir: sessionDir, Workdir: workdir, Manifest: filepath.Join(sessionDir, "manifest.yaml")}, Metadata: map[string]string{"artifact": a.Coordinates.Namespace + ":" + a.Coordinates.Name + ":" + a.Coordinates.Version, "parent_artifact": manifestDigest}}
-	if err := protocol.WriteYAML(instance.Paths.Manifest, instance); err != nil {
+	instance.Metadata["import_state"] = "ready"
+	if err := protocol.WriteYAML(manifestPath, instance); err != nil {
 		return protocol.InstanceManifest{}, err
 	}
-	completed = true
 	return instance, nil
+}
+
+func observedComponentComplete(observed []protocol.ResolvedRef, desired spec.Component) bool {
+	wantRevision := componentRevision(desired)
+	for _, ref := range observed {
+		if ref.ID == desired.ID && ref.Path == desired.Path && ref.Provider == desired.Provider && ref.Revision == wantRevision {
+			return true
+		}
+	}
+	return false
+}
+
+func inspectImportTarget(workdir, manifestPath, sessionID, artifactDigest string, components []spec.Component) (protocol.InstanceManifest, bool, error) {
+	_, manifestErr := os.Lstat(manifestPath)
+	hasState := manifestErr == nil
+	if manifestErr != nil && !os.IsNotExist(manifestErr) {
+		return protocol.InstanceManifest{}, false, manifestErr
+	}
+	info, err := os.Lstat(workdir)
+	if os.IsNotExist(err) {
+		if hasState {
+			return protocol.InstanceManifest{}, false, fmt.Errorf("Session state exists but import target %q is missing", workdir)
+		}
+		return protocol.InstanceManifest{}, false, nil
+	}
+	if err != nil {
+		return protocol.InstanceManifest{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return protocol.InstanceManifest{}, false, fmt.Errorf("import target %q must be a directory, not a symlink", workdir)
+	}
+	entries, err := os.ReadDir(workdir)
+	if err != nil {
+		return protocol.InstanceManifest{}, false, err
+	}
+	if !hasState {
+		if len(entries) == 0 {
+			return protocol.InstanceManifest{}, false, nil
+		}
+		return protocol.InstanceManifest{}, false, fmt.Errorf("import target %q is not empty and has no retryable LXP state", workdir)
+	}
+	instance, err := protocol.ReadYAML[protocol.InstanceManifest](manifestPath)
+	if err != nil {
+		return protocol.InstanceManifest{}, false, fmt.Errorf("import target %q is not empty and has no retryable LXP state", workdir)
+	}
+	if instance.ID != sessionID || instance.Metadata["artifact_digest"] != artifactDigest {
+		return protocol.InstanceManifest{}, false, fmt.Errorf("import target belongs to a different Session or Artifact")
+	}
+	if filepath.Clean(instance.Paths.Workdir) != filepath.Clean(workdir) || filepath.Clean(instance.Paths.Manifest) != filepath.Clean(manifestPath) {
+		return protocol.InstanceManifest{}, false, fmt.Errorf("import target Session paths do not match this target")
+	}
+	state := instance.Metadata["import_state"]
+	if state != "importing" && state != "ready" {
+		return protocol.InstanceManifest{}, false, fmt.Errorf("import target has invalid state %q", state)
+	}
+	if state == "importing" {
+		if err := validateRetryOwnership(workdir, components); err != nil {
+			return protocol.InstanceManifest{}, false, err
+		}
+	}
+	return instance, true, nil
+}
+
+func validateRetryOwnership(workdir string, components []spec.Component) error {
+	return filepath.Walk(workdir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == workdir {
+			return nil
+		}
+		rel, err := filepath.Rel(workdir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == ".lxp" {
+			return filepath.SkipDir
+		}
+		for _, component := range components {
+			if rel == component.Path || strings.HasPrefix(rel, component.Path+"/") || strings.HasPrefix(component.Path, rel+"/") {
+				return nil
+			}
+		}
+		return fmt.Errorf("import target contains unowned retry path %q", rel)
+	})
+}
+
+func replaceObserved(components []protocol.ResolvedRef, observed protocol.ResolvedRef) []protocol.ResolvedRef {
+	for i := range components {
+		if components[i].ID == observed.ID {
+			components[i] = observed
+			return components
+		}
+	}
+	return append(components, observed)
 }
 
 func hasArtifactAncestor(component spec.Component, components []spec.Component) bool {
@@ -426,59 +494,6 @@ func validateNestedTarget(workdir, target string) error {
 		if i == len(parts)-1 {
 			if !info.IsDir() {
 				return fmt.Errorf("nested Component target is not a directory")
-			}
-			entries, err := os.ReadDir(current)
-			if err != nil {
-				return err
-			}
-			if len(entries) != 0 {
-				return fmt.Errorf("nested Component target is not empty")
-			}
-		}
-	}
-	return nil
-}
-
-func validateArtifactLock(a spec.Artifact, lock spec.Lock, manifestDigest string) error {
-	if lock.APIVersion != spec.APIVersion || lock.Artifact != manifestDigest {
-		return fmt.Errorf("manifest does not match lock digest")
-	}
-	if len(lock.Components) != len(a.Components) {
-		return fmt.Errorf("component lock count does not match manifest")
-	}
-	locked := make(map[string]spec.RefLock, len(lock.Components))
-	for _, item := range lock.Components {
-		if _, exists := locked[item.ID]; exists {
-			return fmt.Errorf("duplicate component lock %q", item.ID)
-		}
-		locked[item.ID] = item
-	}
-	for _, component := range a.Components {
-		item, ok := locked[component.ID]
-		if !ok || item.Path != component.Path || item.Provider != component.Provider || item.Contract != component.Contract || item.Distribution != component.Distribution {
-			return fmt.Errorf("component %q does not match lock", component.ID)
-		}
-		revision := ""
-		if component.Reference != nil {
-			revision = component.Reference.Revision
-		} else if component.Embedded != nil {
-			revision = component.Embedded.Revision
-		}
-		if item.Revision != revision {
-			return fmt.Errorf("component %q revision does not match lock", component.ID)
-		}
-		embedded := map[string]string{}
-		if component.Embedded != nil {
-			for role, payload := range component.Embedded.Payloads {
-				embedded[role] = payload.Digest
-			}
-		}
-		if len(item.Embedded) != len(embedded) {
-			return fmt.Errorf("component %q payload lock does not match manifest", component.ID)
-		}
-		for role, digest := range embedded {
-			if item.Embedded[role] != digest {
-				return fmt.Errorf("component %q payload %q does not match lock", component.ID, role)
 			}
 		}
 	}
@@ -519,6 +534,41 @@ func verifyPayloads(a spec.Artifact, store bundle.Store) error {
 	return nil
 }
 
+func validateBundleEnvelope(root string, artifact spec.Artifact) error {
+	allowedFiles := map[string]bool{"manifest.yaml": true}
+	allowedDirectories := map[string]bool{".": true}
+	for _, component := range artifact.Components {
+		if component.Embedded == nil {
+			continue
+		}
+		for _, payload := range component.Embedded.Payloads {
+			hexDigest := strings.TrimPrefix(payload.Digest, "sha256:")
+			allowedFiles[filepath.Join("objects", "sha256", hexDigest)] = true
+			allowedDirectories["objects"] = true
+			allowedDirectories[filepath.Join("objects", "sha256")] = true
+		}
+	}
+	return filepath.Walk(root, func(entryPath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, entryPath)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if !allowedDirectories[rel] {
+				return fmt.Errorf("bundle contains unexpected directory %q", filepath.ToSlash(rel))
+			}
+			return nil
+		}
+		if !allowedFiles[rel] {
+			return fmt.Errorf("bundle contains unexpected file %q", filepath.ToSlash(rel))
+		}
+		return nil
+	})
+}
+
 func distributionFor(componentProvider provider.Provider, id string, opts ExportOptions) (string, error) {
 	mode := opts.Distribution
 	if override := opts.ComponentDistribution[id]; override != "" {
@@ -540,7 +590,7 @@ func distributionFor(componentProvider provider.Provider, id string, opts Export
 			return mode, nil
 		}
 	}
-	return "", fmt.Errorf("component %q provider %q does not support %s distribution", id, componentProvider.Name(), mode)
+	return "", fmt.Errorf("component %q provider %s does not support %s distribution", id, componentProvider.Contract().String(), mode)
 }
 
 func fileDigest(path string) (string, error) {

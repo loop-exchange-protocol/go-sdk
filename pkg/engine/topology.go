@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 func pathContains(parent, child string) bool {
@@ -38,7 +38,7 @@ func directResolvedChildren(parent protocol.ResolvedRef, components []protocol.R
 		if revisions != nil && revisions[candidate.ID] != "" {
 			revision = revisions[candidate.ID]
 		}
-		children = append(children, protocol.ChildComponent{ID: candidate.ID, Path: relativeComponentPath(parent.Path, candidate.Path), Provider: candidate.Provider, Contract: candidate.Contract, Revision: revision})
+		children = append(children, protocol.ChildComponent{ID: candidate.ID, Path: relativeComponentPath(parent.Path, candidate.Path), Provider: candidate.Provider, Revision: revision})
 	}
 	sort.Slice(children, func(i, j int) bool { return children[i].Path < children[j].Path })
 	return children
@@ -48,7 +48,7 @@ func directArtifactChildren(parent spec.Component, components []spec.Component) 
 	refs := make([]protocol.ResolvedRef, 0, len(components))
 	revisions := make(map[string]string, len(components))
 	for _, component := range components {
-		refs = append(refs, protocol.ResolvedRef{ID: component.ID, Path: component.Path, Provider: component.Provider, Contract: component.Contract})
+		refs = append(refs, protocol.ResolvedRef{ID: component.ID, Path: component.Path, Provider: component.Provider})
 		revisions[component.ID] = componentRevision(component)
 	}
 	return directResolvedChildren(protocol.ResolvedRef{ID: parent.ID, Path: parent.Path}, refs, revisions)

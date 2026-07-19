@@ -12,8 +12,9 @@ import (
 
 	ignore "github.com/sabhiram/go-gitignore"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/provider"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	"github.com/loop-exchange-protocol/lxp/pkg/provider"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 type WorktreeStatus struct {
@@ -41,7 +42,7 @@ func (e *Engine) StatusContext(ctx context.Context, sessionID string) (WorktreeS
 	}
 	for _, component := range sortedResolved(instance.Components, true) {
 		component.Children = directResolvedChildren(component, instance.Components, nil)
-		p, err := e.Providers.Get(component.Provider)
+		p, err := e.providerFor(component.Provider)
 		if err != nil {
 			return status, err
 		}
@@ -62,8 +63,7 @@ func (e *Engine) StatusContext(ctx context.Context, sessionID string) (WorktreeS
 }
 
 type AddOptions struct {
-	Provider string
-	Contract string
+	Provider spec.Contract
 }
 
 func (e *Engine) Add(sessionID string, paths []string) (protocol.InstanceManifest, error) {
@@ -95,11 +95,11 @@ func (e *Engine) AddWithOptionsContext(ctx context.Context, sessionID string, pa
 		owner := deepestOwner(instance.Components, rel)
 		if owner >= 0 {
 			component := instance.Components[owner]
-			if opts.Provider != "" && (component.Provider != opts.Provider || component.Contract != opts.Contract) {
-				return protocol.InstanceManifest{}, fmt.Errorf("path %q is owned by %s@%s, not requested %s@%s", rel, component.Provider, component.Contract, opts.Provider, opts.Contract)
+			if opts.Provider.Valid() && component.Provider != opts.Provider {
+				return protocol.InstanceManifest{}, fmt.Errorf("path %q is owned by %s, not requested %s", rel, component.Provider.String(), opts.Provider.String())
 			}
-			if opts.Provider == "" {
-				p, err := e.Providers.Get(component.Provider)
+			if !opts.Provider.Valid() {
+				p, err := e.providerFor(component.Provider)
 				if err != nil {
 					return protocol.InstanceManifest{}, err
 				}
@@ -123,13 +123,10 @@ func (e *Engine) AddWithOptionsContext(ctx context.Context, sessionID string, pa
 		var p provider.Provider
 		componentPath := rel
 		componentTarget := target
-		if opts.Provider != "" {
-			p, err = e.Providers.Get(opts.Provider)
+		if opts.Provider.Valid() {
+			p, err = e.providerFor(opts.Provider)
 			if err != nil {
 				return protocol.InstanceManifest{}, err
-			}
-			if opts.Contract != p.Contract() {
-				return protocol.InstanceManifest{}, fmt.Errorf("requested provider %s@%s; installed contract is %s", opts.Provider, opts.Contract, p.Contract())
 			}
 		} else {
 			p, componentPath, componentTarget, err = e.discoverProviderRoot(ctx, instance.Paths.Workdir, rel, target)
@@ -177,11 +174,11 @@ func componentAtPath(components []protocol.ResolvedRef, path string) int {
 }
 
 func (e *Engine) adoptComponentTree(ctx context.Context, instance *protocol.InstanceManifest, p provider.Provider, componentPath, componentTarget string) (protocol.ResolvedRef, error) {
-	ref := protocol.ResolvedRef{ID: componentID(componentPath), Path: componentPath, Provider: p.Name(), Contract: p.Contract(), Source: "session", PoolPath: componentTarget, Materialized: componentTarget}
+	ref := protocol.ResolvedRef{ID: componentID(componentPath), Path: componentPath, Provider: p.Contract(), Source: "session", PoolPath: componentTarget, Materialized: componentTarget}
 	if adopter, ok := p.(provider.Adopter); ok {
 		adopted, err := adopter.Adopt(ctx, ref.ID, componentPath, componentTarget)
 		if err != nil {
-			return protocol.ResolvedRef{}, fmt.Errorf("adopt through provider %q: %w", p.Name(), err)
+			return protocol.ResolvedRef{}, fmt.Errorf("adopt through provider %s: %w", p.Contract().String(), err)
 		}
 		ref = adopted
 	}
@@ -204,20 +201,20 @@ func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol
 	}
 	children, err := discoverer.DiscoverChildren(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("discover nested components through provider %q: %w", p.Name(), err)
+		return fmt.Errorf("discover nested components through provider %s: %w", p.Contract().String(), err)
 	}
 	for _, relative := range children {
 		cleanRelative := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relative)))
 		if relative == "" || cleanRelative != relative || cleanRelative == "." || cleanRelative == ".." || strings.HasPrefix(cleanRelative, "../") || filepath.IsAbs(filepath.FromSlash(relative)) {
-			return fmt.Errorf("provider %q returned unsafe nested root %q", p.Name(), relative)
+			return fmt.Errorf("provider %s returned unsafe nested root %q", p.Contract().String(), relative)
 		}
 		childPath, err := cleanTrackedPath(ref.Path + "/" + cleanRelative)
 		if err != nil || !pathContains(ref.Path, childPath) {
-			return fmt.Errorf("provider %q returned unsafe nested root %q", p.Name(), relative)
+			return fmt.Errorf("provider %s returned unsafe nested root %q", p.Contract().String(), relative)
 		}
 		if existing := componentAtPath(instance.Components, childPath); existing >= 0 {
 			child := instance.Components[existing]
-			childProvider, err := e.Providers.Get(child.Provider)
+			childProvider, err := e.providerFor(child.Provider)
 			if err != nil {
 				return err
 			}
@@ -227,9 +224,16 @@ func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol
 			continue
 		}
 		childTarget := filepath.Join(ref.Materialized, filepath.FromSlash(cleanRelative))
-		childProvider, err := e.Providers.Match(ctx, childTarget)
+		candidates, err := e.discoveryProviders()
 		if err != nil {
 			return fmt.Errorf("nested component %q: %w", childPath, err)
+		}
+		childProvider, _, err := matchProvider(ctx, childTarget, candidates)
+		if err != nil {
+			return fmt.Errorf("nested component %q: %w", childPath, err)
+		}
+		if childProvider == nil {
+			return fmt.Errorf("nested component %q: no provider matches %q", childPath, childTarget)
 		}
 		if _, err := e.adoptComponentTree(ctx, instance, childProvider, childPath, childTarget); err != nil {
 			return err
@@ -239,7 +243,7 @@ func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol
 }
 
 func (e *Engine) addThroughProvider(ctx context.Context, instance protocol.InstanceManifest, component protocol.ResolvedRef, workspacePath string) error {
-	p, err := e.Providers.Get(component.Provider)
+	p, err := e.providerFor(component.Provider)
 	if err != nil {
 		return err
 	}
@@ -253,7 +257,7 @@ func (e *Engine) addThroughProvider(ctx context.Context, instance protocol.Insta
 		providerPath = "."
 	}
 	if err := tracker.Add(ctx, component, []string{providerPath}); err != nil {
-		return fmt.Errorf("add through provider %q: %w", component.Provider, err)
+		return fmt.Errorf("add through provider %s: %w", component.Provider.String(), err)
 	}
 	return nil
 }
@@ -272,7 +276,7 @@ func (e *Engine) trackParentBoundary(ctx context.Context, instance protocol.Inst
 		return nil
 	}
 	parent := instance.Components[parentIndex]
-	p, err := e.Providers.Get(parent.Provider)
+	p, err := e.providerFor(parent.Provider)
 	if err != nil {
 		return err
 	}
@@ -282,18 +286,22 @@ func (e *Engine) trackParentBoundary(ctx context.Context, instance protocol.Inst
 	}
 	parent.Children = directResolvedChildren(parent, instance.Components, nil)
 	if err := tracker.TrackChild(ctx, parent, child); err != nil {
-		return fmt.Errorf("track child boundary through provider %q: %w", parent.Provider, err)
+		return fmt.Errorf("track child boundary through provider %s: %w", parent.Provider.String(), err)
 	}
 	return nil
 }
 
 func (e *Engine) discoverProviderRoot(ctx context.Context, workdir, rel, target string) (provider.Provider, string, string, error) {
+	candidates, err := e.discoveryProviders()
+	if err != nil {
+		return nil, "", "", err
+	}
 	current := target
 	bestPath, bestTarget := rel, target
 	var best provider.Provider
 	bestScore := 0
 	for {
-		p, score, err := e.Providers.MatchScore(ctx, current)
+		p, score, err := matchProvider(ctx, current, candidates)
 		if err != nil {
 			return nil, "", "", err
 		}
@@ -315,6 +323,27 @@ func (e *Engine) discoverProviderRoot(ctx context.Context, workdir, rel, target 
 		return nil, "", "", fmt.Errorf("no provider matches %q", rel)
 	}
 	return best, bestPath, bestTarget, nil
+}
+
+func matchProvider(ctx context.Context, path string, candidates []provider.Provider) (provider.Provider, int, error) {
+	var selected provider.Provider
+	best := 0
+	matches := 0
+	for _, candidate := range candidates {
+		score, err := candidate.Match(ctx, path)
+		if err != nil {
+			return nil, 0, fmt.Errorf("match provider %s: %w", candidate.Contract().String(), err)
+		}
+		if score > best {
+			selected, best, matches = candidate, score, 1
+		} else if score > 0 && score == best {
+			matches++
+		}
+	}
+	if matches > 1 {
+		return nil, 0, fmt.Errorf("path %q matches multiple providers at priority %d", path, best)
+	}
+	return selected, best, nil
 }
 
 func statusFor(instance protocol.InstanceManifest) (WorktreeStatus, error) {

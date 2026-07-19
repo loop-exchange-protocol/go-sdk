@@ -3,9 +3,8 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 type CheckItem struct {
@@ -21,48 +20,48 @@ type CheckItem struct {
 }
 
 func Check(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts Options) []CheckItem {
+	return CheckWithRegistry(ctx, DefaultRegistry(), requirements, required, opts)
+}
+
+func CheckWithRegistry(ctx context.Context, registry *Registry, requirements []spec.Requirement, required map[string]bool, opts Options) []CheckItem {
 	items := make([]CheckItem, 0, len(requirements))
 	for _, req := range requirements {
-		item := CheckItem{ID: req.ID, Description: req.Description, Kind: req.Check.Type, Required: required[req.ID], Status: "missing", Action: "satisfy-requirement"}
-		if strings.HasPrefix(req.ProvidedBy, "component:") {
-			producer := strings.TrimPrefix(req.ProvidedBy, "component:")
-			item.Status, item.Detail, item.Action = "deferred", "checked after component "+producer+" activates", "activate-component"
-			item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Activate component %q, then refresh this Requirement.", producer))
-			items = append(items, item)
-			continue
-		}
-		var lock spec.RuntimeLock
-		var err error
-		switch req.Check.Type {
-		case "credential":
+		contract := req.Check.Checker
+		item := CheckItem{ID: req.ID, Description: req.Description, Kind: contract.String(), Required: required[req.ID], Status: "missing", Action: "satisfy-requirement"}
+		checker, err := registry.Get(contract)
+		var observation Observation
+		switch contract {
+		case CredentialContract:
 			item.Action = "provide-binding"
 			item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Provide credential %q using an accepted scheme, then refresh.", req.ID))
-			lock, err = resolveCredential(req, opts)
-		case "executable":
-			item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Install %q on PATH, approve executable probes, then refresh.", req.Check.Command))
+		case ExecutableContract:
+			command, _ := configString(req.Check.Config, "command")
+			item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Install %q on PATH, approve executable probes, then refresh.", command))
 			if !opts.AllowExecutables {
 				item.Status, item.Detail, item.Action = "approval", "executable probe requires approval", "approve-executable"
-			} else {
-				lock, err = resolveExecutable(ctx, req)
 			}
-		case "mcp":
-			item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Make MCP command %q available with the declared tools, approve MCP checks, then refresh.", req.Check.Command))
+		case MCPContract:
+			command, _ := configString(req.Check.Config, "command")
+			item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Make MCP command %q available with the declared tools, approve MCP checks, then refresh.", command))
 			if !opts.AllowMCP {
 				item.Status, item.Detail, item.Action = "approval", "MCP check requires approval", "approve-mcp"
-			} else {
-				lock, err = resolveMCP(ctx, req, opts)
 			}
 		default:
-			err = fmt.Errorf("unsupported check type %q", req.Check.Type)
+			if err == nil {
+				item.Prompt, item.PromptSource = selectPrompt(req.Prompt, fmt.Sprintf("Satisfy checker contract %s, then refresh.", contract.String()))
+			}
 		}
 		if item.Status != "approval" {
+			if err == nil {
+				observation, err = checker.Check(ctx, req, opts)
+			}
 			if err != nil {
 				item.Detail = err.Error()
 			} else {
 				item.Status, item.Action, item.Prompt, item.PromptSource = "ready", "none", "No action required.", "engine"
-				item.Detail = lock.Implementation
+				item.Detail = observation.Implementation
 				if item.Detail == "" {
-					item.Detail = lock.ContractDigest
+					item.Detail = observation.ContractDigest
 				}
 			}
 		}

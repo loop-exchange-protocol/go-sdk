@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
-	gitprovider "github.com/loop-exchange-protocol/go-provider-git"
+	gitprovider "github.com/loop-exchange-protocol/provider-git"
 
-	"github.com/loop-exchange-protocol/go-sdk/pkg/bundle"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/engine"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
-	lxpruntime "github.com/loop-exchange-protocol/go-sdk/pkg/runtime"
-	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
+	"github.com/loop-exchange-protocol/lxp/pkg/bundle"
+	"github.com/loop-exchange-protocol/lxp/pkg/engine"
+	"github.com/loop-exchange-protocol/lxp/pkg/extension"
+	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
+	lxpruntime "github.com/loop-exchange-protocol/lxp/pkg/runtime"
+	"github.com/loop-exchange-protocol/lxp/pkg/spec"
 )
 
 const defaultOperationTimeout = 15 * time.Minute
@@ -49,8 +50,27 @@ func operationTimeout() (time.Duration, error) {
 	return timeout, nil
 }
 
-func newEngine(root string) *engine.Engine {
-	return engine.New(root, gitprovider.New(filepath.Join(root, "provider-store", "git")))
+func newEngine(root string) (*engine.Engine, error) {
+	config := extension.Default()
+	configPath := os.Getenv("LXP_CONFIG")
+	if configPath == "" {
+		if userConfig, err := os.UserConfigDir(); err == nil {
+			candidate := filepath.Join(userConfig, "lxp", "config.yaml")
+			if _, err := os.Stat(candidate); err == nil {
+				configPath = candidate
+			} else if !os.IsNotExist(err) {
+				return nil, err
+			}
+		}
+	}
+	if configPath != "" {
+		var err error
+		config, err = extension.Read(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("read engine config: %w", err)
+		}
+	}
+	return engine.NewWithConfig(root, config, lxpruntime.DefaultRegistry(), gitprovider.New(filepath.Join(root, "provider-store", "git"))), nil
 }
 
 func run(ctx context.Context, args []string) error {
@@ -101,7 +121,11 @@ func runInit(ctx context.Context, args []string) error {
 	if *root == "" {
 		*root = filepath.Join(absWorkdir, ".lxp")
 	}
-	instance, err := newEngine(*root).InitAt(ctx, *sessionID, absWorkdir)
+	e, err := newEngine(*root)
+	if err != nil {
+		return err
+	}
+	instance, err := e.InitAt(ctx, *sessionID, absWorkdir)
 	if err != nil {
 		return err
 	}
@@ -121,7 +145,11 @@ func runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	status, err := newEngine(resolvedRoot).StatusContext(ctx, resolvedSession)
+	e, err := newEngine(resolvedRoot)
+	if err != nil {
+		return err
+	}
+	status, err := e.StatusContext(ctx, resolvedSession)
 	if err != nil {
 		return err
 	}
@@ -153,7 +181,7 @@ func runAdd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	root := fs.String("root", "", "protocol state root")
 	sessionID := fs.String("session-id", "", "session id")
-	providerContract := fs.String("provider", "", "explicit provider contract ID@VERSION")
+	providerContract := fs.String("provider", "", "explicit provider contract NAMESPACE:NAME:VERSION")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -161,7 +189,7 @@ func runAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	providerID, contract, err := parseProviderContract(*providerContract)
+	providerID, err := parseProviderContract(*providerContract)
 	if err != nil {
 		return err
 	}
@@ -169,7 +197,11 @@ func runAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	instance, err := newEngine(resolvedRoot).AddWithOptionsContext(ctx, resolvedSession, paths, engine.AddOptions{Provider: providerID, Contract: contract})
+	e, err := newEngine(resolvedRoot)
+	if err != nil {
+		return err
+	}
+	instance, err := e.AddWithOptionsContext(ctx, resolvedSession, paths, engine.AddOptions{Provider: providerID})
 	if err != nil {
 		return err
 	}
@@ -210,18 +242,21 @@ func runImport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(workdir); err == nil {
-		return fmt.Errorf("import target %q already exists", workdir)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
 	root := filepath.Join(workdir, ".lxp")
-	e := newEngine(root)
-	artifact, plans, err := validateProductionBundle(ctx, bundlePath)
+	e, err := newEngine(root)
 	if err != nil {
 		return err
 	}
-	printPlans(os.Stderr, plans)
+	if instance, ready, err := e.ReadyBundleImport(engine.BundleImportOptions{Bundle: bundlePath, SessionID: *sessionID, Workdir: workdir}); err != nil {
+		return err
+	} else if ready {
+		fmt.Printf("Imported into %s\n", instance.Paths.Workdir)
+		return nil
+	}
+	artifact, err := validateProductionBundle(ctx, e, bundlePath)
+	if err != nil {
+		return err
+	}
 	resolvedProfile := *profilePath
 	if resolvedProfile == "" {
 		resolvedProfile = defaultProfilePath(root, artifact)
@@ -260,18 +295,6 @@ func runImport(ctx context.Context, args []string) error {
 	return nil
 }
 
-func printPlans(out *os.File, plans []engine.ComponentPlan) {
-	for _, plan := range plans {
-		fmt.Fprintf(out, "Plan %s (%s@%s):\n", plan.Component, plan.Provider, plan.Contract)
-		for _, action := range plan.Actions {
-			fmt.Fprintf(out, "  - %s\n", action)
-		}
-		if len(plan.Requirements) > 0 {
-			fmt.Fprintf(out, "  requirements: %s\n", strings.Join(plan.Requirements, ", "))
-		}
-	}
-}
-
 func runRequirements(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("requirements", flag.ContinueOnError)
 	format := fs.String("format", "tui", "tui or json")
@@ -287,7 +310,11 @@ func runRequirements(ctx context.Context, args []string) error {
 		return fmt.Errorf("requirements requires one Artifact")
 	}
 	bundlePath := fs.Arg(0)
-	artifact, _, err := validateProductionBundle(ctx, bundlePath)
+	e, err := newEngine("")
+	if err != nil {
+		return err
+	}
+	artifact, err := validateProductionBundle(ctx, e, bundlePath)
 	if err != nil {
 		return err
 	}
@@ -326,40 +353,24 @@ func runRequirements(ctx context.Context, args []string) error {
 	return lxpruntime.WriteProfile(resolvedProfile, lxpruntime.ProfileFromOptions(opts))
 }
 
-func readBundleArtifact(path string) (spec.Artifact, error) {
-	tmp, err := os.MkdirTemp("", "lxp-requirements-")
-	if err != nil {
-		return spec.Artifact{}, err
-	}
-	defer os.RemoveAll(tmp)
-	if err := bundle.Unpack(path, tmp); err != nil {
-		return spec.Artifact{}, err
-	}
-	return spec.ReadArtifact(filepath.Join(tmp, "manifest.yaml"))
-}
-
-func validateProductionBundle(ctx context.Context, path string) (spec.Artifact, []engine.ComponentPlan, error) {
+func validateProductionBundle(ctx context.Context, e *engine.Engine, path string) (spec.Artifact, error) {
 	if err := requireArchivePath(path); err != nil {
-		return spec.Artifact{}, nil, err
+		return spec.Artifact{}, err
 	}
-	artifact, err := readBundleArtifact(path)
+	artifact, err := e.ValidateBundle(ctx, path)
 	if err != nil {
-		return spec.Artifact{}, nil, err
+		return spec.Artifact{}, err
 	}
 	if err := validateProductionArtifact(artifact); err != nil {
-		return spec.Artifact{}, nil, err
+		return spec.Artifact{}, err
 	}
-	plans, err := newEngine("").PlanBundle(ctx, path)
-	if err != nil {
-		return spec.Artifact{}, nil, err
-	}
-	return artifact, plans, nil
+	return artifact, nil
 }
 
 func validateProductionArtifact(artifact spec.Artifact) error {
 	for _, component := range artifact.Components {
-		if component.Provider != "git" || component.Contract != "v1" {
-			return fmt.Errorf("production profile rejects component %q: only git@v1 is supported", component.ID)
+		if component.Provider != gitprovider.GitContract {
+			return fmt.Errorf("production profile rejects component %q: only %s is supported", component.ID, gitprovider.GitContract.String())
 		}
 		switch component.Distribution {
 		case "reference":
@@ -462,7 +473,11 @@ func runExport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	path, err := newEngine(resolvedRoot).Export(ctx, engine.ExportOptions{
+	e, err := newEngine(resolvedRoot)
+	if err != nil {
+		return err
+	}
+	path, err := e.Export(ctx, engine.ExportOptions{
 		SessionID:    resolvedSession,
 		Namespace:    "local",
 		Name:         resolvedSession,
@@ -497,7 +512,11 @@ func runInspect(ctx context.Context, args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("inspect requires one Artifact")
 	}
-	if _, _, err := validateProductionBundle(ctx, fs.Arg(0)); err != nil {
+	e, err := newEngine("")
+	if err != nil {
+		return err
+	}
+	if _, err := validateProductionBundle(ctx, e, fs.Arg(0)); err != nil {
 		return err
 	}
 	tmp, err := os.MkdirTemp("", "lxp-inspect-")
@@ -528,11 +547,12 @@ Usage:
   lxp import [--session-id work] ARTIFACT.lxpz [WORKDIR]
   lxp export [--distribution embedded|reference|mirrored] ARTIFACT.lxpz
   lxp status [--format text|json]
-  lxp add [--provider ID@CONTRACT] PATH...
+  lxp add [--provider NAMESPACE:NAME:VERSION] PATH...
   lxp inspect ARTIFACT.lxpz
   lxp requirements [--format tui|json] ARTIFACT.lxpz
 
 Environment:
+  LXP_CONFIG   local EngineConfig path (default: user config lxp/config.yaml)
   LXP_TIMEOUT  positive Go duration for the operation deadline (default: 15m)`)
 	return nil
 }
@@ -655,15 +675,11 @@ func parseBindings(values []string) (map[string]string, error) {
 	return out, nil
 }
 
-func parseProviderContract(value string) (string, string, error) {
+func parseProviderContract(value string) (spec.Contract, error) {
 	if value == "" {
-		return "", "", nil
+		return spec.Contract{}, nil
 	}
-	parts := strings.Split(value, "@")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("invalid provider %q; expected ID@CONTRACT", value)
-	}
-	return parts[0], parts[1], nil
+	return spec.ParseContract(value)
 }
 
 func requiredArtifactRequirements(components []spec.Component) map[string]bool {
