@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
@@ -23,7 +24,41 @@ type Options struct {
 	AllowExecutables bool
 }
 
+const (
+	externalCommandWaitDelay = 2 * time.Second
+	maxProbeOutputBytes      = 64 << 10
+	maxMCPMessageBytes       = 1 << 20
+)
+
+type limitedOutput struct {
+	mu    sync.Mutex
+	data  []byte
+	limit int
+}
+
+func (w *limitedOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	remaining := w.limit - len(w.data)
+	if remaining > len(p) {
+		remaining = len(p)
+	}
+	if remaining > 0 {
+		w.data = append(w.data, p[:remaining]...)
+	}
+	return len(p), nil
+}
+
+func (w *limitedOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.data)
+}
+
 func Resolve(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts Options) ([]spec.RuntimeLock, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	locks := make([]spec.RuntimeLock, 0, len(requirements))
 	for _, req := range requirements {
 		var lock spec.RuntimeLock
@@ -93,11 +128,17 @@ func resolveExecutable(ctx context.Context, req spec.Requirement) (spec.RuntimeL
 	defer cancel()
 	cmd := exec.CommandContext(probeCtx, path, args...)
 	cmd.Env = MinimalEnv()
-	out, err := cmd.CombinedOutput()
+	cmd.WaitDelay = externalCommandWaitDelay
+	out := &limitedOutput{limit: maxProbeOutputBytes}
+	cmd.Stdout, cmd.Stderr = out, out
+	err = cmd.Run()
 	if err != nil {
+		if probeCtx.Err() != nil {
+			return spec.RuntimeLock{}, fmt.Errorf("probe failed: %w", probeCtx.Err())
+		}
 		return spec.RuntimeLock{}, fmt.Errorf("probe failed: %w", err)
 	}
-	version := strings.TrimSpace(string(out))
+	version := strings.TrimSpace(out.String())
 	if len(version) > 256 {
 		version = version[:256]
 	}
@@ -116,6 +157,7 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.R
 	cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, path, req.Check.Args...)
+	cmd.WaitDelay = externalCommandWaitDelay
 	env := MinimalEnv()
 	if inject := req.Check.SecretEnv; inject != nil {
 		for slot, target := range inject {
@@ -138,19 +180,28 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.R
 	if err := cmd.Start(); err != nil {
 		return spec.RuntimeLock{}, err
 	}
+	defer func() {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
 	enc := json.NewEncoder(stdin)
 	dec := bufio.NewScanner(stdout)
+	dec.Buffer(make([]byte, 64<<10), maxMCPMessageBytes)
 	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "lxp", "version": "0.1.0"}}}); err != nil {
 		return spec.RuntimeLock{}, err
 	}
-	if _, err := scanResponse(dec, 1); err != nil {
+	if _, err := scanResponse(cmdCtx, dec, stdout, 1); err != nil {
 		return spec.RuntimeLock{}, err
 	}
 	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized", "params": map[string]any{}})
 	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}}); err != nil {
 		return spec.RuntimeLock{}, err
 	}
-	result, err := scanResponse(dec, 2)
+	result, err := scanResponse(cmdCtx, dec, stdout, 2)
 	if err != nil {
 		return spec.RuntimeLock{}, err
 	}
@@ -173,13 +224,30 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (spec.R
 			return spec.RuntimeLock{}, fmt.Errorf("required MCP tool %q is missing", name)
 		}
 	}
-	_ = stdin.Close()
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
 	return spec.RuntimeLock{ID: req.ID, Provider: req.Check.Type, Status: "ready", Implementation: path, ContractDigest: "sha256:" + hex.EncodeToString(sum[:])}, nil
 }
 
-func scanResponse(scanner *bufio.Scanner, id int) (any, error) {
+type scanResult struct {
+	value any
+	err   error
+}
+
+func scanResponse(ctx context.Context, scanner *bufio.Scanner, output io.Closer, id int) (any, error) {
+	result := make(chan scanResult, 1)
+	go func() {
+		value, err := scanResponseBlocking(scanner, id)
+		result <- scanResult{value: value, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = output.Close()
+		return nil, ctx.Err()
+	case value := <-result:
+		return value.value, value.err
+	}
+}
+
+func scanResponseBlocking(scanner *bufio.Scanner, id int) (any, error) {
 	for scanner.Scan() {
 		var msg map[string]any
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
@@ -193,6 +261,9 @@ func scanResponse(scanner *bufio.Scanner, id int) (any, error) {
 			return nil, fmt.Errorf("MCP error: %v", rpcErr)
 		}
 		return msg["result"], nil
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read MCP response: %w", err)
 	}
 	return nil, fmt.Errorf("MCP server closed before response %d", id)
 }

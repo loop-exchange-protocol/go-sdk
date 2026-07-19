@@ -21,11 +21,32 @@ import (
 	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
 )
 
+const defaultOperationTimeout = 15 * time.Minute
+
 func main() {
-	if err := run(context.Background(), os.Args[1:]); err != nil {
+	timeout, err := operationTimeout()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "lxp: %v\n", err)
 		os.Exit(1)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := run(ctx, os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "lxp: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func operationTimeout() (time.Duration, error) {
+	value := os.Getenv("LXP_TIMEOUT")
+	if value == "" {
+		return defaultOperationTimeout, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return 0, fmt.Errorf("LXP_TIMEOUT must be a positive Go duration")
+	}
+	return timeout, nil
 }
 
 func newEngine(root string) *engine.Engine {
@@ -49,9 +70,9 @@ func run(ctx context.Context, args []string) error {
 	case "requirements":
 		return runRequirements(ctx, args[1:])
 	case "status":
-		return runStatus(args[1:])
+		return runStatus(ctx, args[1:])
 	case "add":
-		return runAdd(args[1:])
+		return runAdd(ctx, args[1:])
 	case "help", "-h", "--help":
 		return usage()
 	default:
@@ -73,7 +94,7 @@ func runInit(ctx context.Context, args []string) error {
 	if fs.NArg() == 1 {
 		workdir = fs.Arg(0)
 	}
-	absWorkdir, err := filepath.Abs(workdir)
+	absWorkdir, err := protocol.CanonicalPath(workdir)
 	if err != nil {
 		return err
 	}
@@ -88,7 +109,7 @@ func runInit(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runStatus(args []string) error {
+func runStatus(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	root := fs.String("root", "", "protocol state root")
 	sessionID := fs.String("session-id", "", "session id")
@@ -100,7 +121,7 @@ func runStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	status, err := newEngine(resolvedRoot).Status(resolvedSession)
+	status, err := newEngine(resolvedRoot).StatusContext(ctx, resolvedSession)
 	if err != nil {
 		return err
 	}
@@ -128,7 +149,7 @@ func runStatus(args []string) error {
 	return nil
 }
 
-func runAdd(args []string) error {
+func runAdd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("add", flag.ContinueOnError)
 	root := fs.String("root", "", "protocol state root")
 	sessionID := fs.String("session-id", "", "session id")
@@ -148,7 +169,7 @@ func runAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	instance, err := newEngine(resolvedRoot).AddWithOptions(resolvedSession, paths, engine.AddOptions{Provider: providerID, Contract: contract})
+	instance, err := newEngine(resolvedRoot).AddWithOptionsContext(ctx, resolvedSession, paths, engine.AddOptions{Provider: providerID, Contract: contract})
 	if err != nil {
 		return err
 	}
@@ -171,7 +192,7 @@ func runImport(ctx context.Context, args []string) error {
 	if fs.NArg() < 1 || fs.NArg() > 2 {
 		return fmt.Errorf("import requires ARTIFACT [WORKDIR]")
 	}
-	bundlePath, err := filepath.Abs(fs.Arg(0))
+	bundlePath, err := protocol.CanonicalPath(fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -185,7 +206,7 @@ func runImport(ctx context.Context, args []string) error {
 		base := filepath.Base(bundlePath)
 		workdir = strings.TrimSuffix(strings.TrimSuffix(base, ".lxpz"), ".lxp")
 	}
-	workdir, err = filepath.Abs(workdir)
+	workdir, err = protocol.CanonicalPath(workdir)
 	if err != nil {
 		return err
 	}
@@ -509,7 +530,10 @@ Usage:
   lxp status [--format text|json]
   lxp add [--provider ID@CONTRACT] PATH...
   lxp inspect ARTIFACT.lxpz
-  lxp requirements [--format tui|json] ARTIFACT.lxpz`)
+  lxp requirements [--format tui|json] ARTIFACT.lxpz
+
+Environment:
+  LXP_TIMEOUT  positive Go duration for the operation deadline (default: 15m)`)
 	return nil
 }
 
@@ -531,7 +555,7 @@ func resolveSession(root, sessionID string) (string, string, error) {
 		}
 		return root, instance.ID, nil
 	}
-	cwd, err := os.Getwd()
+	cwd, err := protocol.CanonicalPath(".")
 	if err != nil {
 		return "", "", err
 	}
@@ -549,7 +573,11 @@ func resolveSession(root, sessionID string) (string, string, error) {
 			if sessionID != "" && instance.ID != sessionID {
 				continue
 			}
-			rel, relErr := filepath.Rel(instance.Paths.Workdir, cwd)
+			workdir, canonicalErr := protocol.CanonicalPath(instance.Paths.Workdir)
+			if canonicalErr != nil {
+				return "", "", canonicalErr
+			}
+			rel, relErr := filepath.Rel(workdir, cwd)
 			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return candidate, instance.ID, nil
 			}
@@ -567,11 +595,15 @@ func normalizeWorkspaceArgs(root, sessionID string, paths []string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	cwd, err := os.Getwd()
+	cwd, err := protocol.CanonicalPath(".")
 	if err != nil {
 		return nil, err
 	}
-	cwdRel, err := filepath.Rel(instance.Paths.Workdir, cwd)
+	workdir, err := protocol.CanonicalPath(instance.Paths.Workdir)
+	if err != nil {
+		return nil, err
+	}
+	cwdRel, err := filepath.Rel(workdir, cwd)
 	if err != nil || cwdRel == ".." || strings.HasPrefix(cwdRel, ".."+string(filepath.Separator)) {
 		return paths, nil
 	}
@@ -581,12 +613,16 @@ func normalizeWorkspaceArgs(root, sessionID string, paths []string) ([]string, e
 		if !filepath.IsAbs(path) {
 			absolute = filepath.Join(cwd, path)
 		}
-		rel, err := filepath.Rel(instance.Paths.Workdir, absolute)
+		absolute, err = protocol.CanonicalPath(absolute)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(workdir, absolute)
 		if err != nil {
 			return nil, err
 		}
 		if rel == "." {
-			entries, err := os.ReadDir(instance.Paths.Workdir)
+			entries, err := os.ReadDir(workdir)
 			if err != nil {
 				return nil, err
 			}

@@ -110,6 +110,57 @@ func TestDirectoryAwareInitAddExportImport(t *testing.T) {
 	}
 }
 
+func TestOperationTimeoutConfiguration(t *testing.T) {
+	t.Setenv("LXP_TIMEOUT", "45s")
+	if got, err := operationTimeout(); err != nil || got != 45*time.Second {
+		t.Fatalf("operation timeout = %s, %v", got, err)
+	}
+	t.Setenv("LXP_TIMEOUT", "0s")
+	if _, err := operationTimeout(); err == nil {
+		t.Fatal("zero operation timeout unexpectedly accepted")
+	}
+}
+
+func TestSessionDiscoveryNormalizesPhysicalPathAliases(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	physicalParent := filepath.Join(root, "private", "var")
+	if err := os.MkdirAll(physicalParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalParent := filepath.Join(root, "var")
+	if err := os.Symlink(physicalParent, logicalParent); err != nil {
+		t.Fatal(err)
+	}
+	logicalWorkdir := filepath.Join(logicalParent, "work")
+	if err := run(ctx, []string{"init", logicalWorkdir}); err != nil {
+		t.Fatal(err)
+	}
+	physicalWorkdir := filepath.Join(physicalParent, "work")
+	instance, err := protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(physicalWorkdir, ".lxp", "sessions", "work", "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.Paths.Workdir != physicalWorkdir {
+		t.Fatalf("stored workdir = %q, want physical path %q", instance.Paths.Workdir, physicalWorkdir)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := os.Chdir(physicalWorkdir); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, sessionID, err := resolveSession("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedRoot != filepath.Join(physicalWorkdir, ".lxp") || sessionID != "work" {
+		t.Fatalf("resolved session = %q, %q", resolvedRoot, sessionID)
+	}
+}
+
 func TestProductionProfileAcceptsAllGitDistributions(t *testing.T) {
 	revision := strings.Repeat("a", 40)
 	base := spec.Payload{MediaType: "application/vnd.git.bundle"}

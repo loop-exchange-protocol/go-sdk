@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      GIT_TERMINAL_PROMPT: "0"
+      GCM_INTERACTIVE: Never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.x
+          cache-dependency-path: |
+            go.sum
+            cmd/lxp/go.sum
+      - name: Test SDK
+        run: go test -race ./...
+      - name: Vet SDK
+        run: go vet ./...
+      - name: Test CLI module
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: cmd/lxp
+        run: go test -race ./...
+      - name: Vet CLI module
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: cmd/lxp
+        run: go vet ./...
+      - name: Check clean generated state
+        run: git diff --exit-code

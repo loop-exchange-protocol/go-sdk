@@ -236,7 +236,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 	cleanupTarget := ""
 	completed := false
 	if opts.Workdir != "" {
-		absWorkdir, err := filepath.Abs(opts.Workdir)
+		absWorkdir, err := protocol.CanonicalPath(opts.Workdir)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}
@@ -351,10 +351,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 		}
 		workdir = filepath.Join(sessionDir, "workdir")
 	} else {
-		workdir, err = filepath.Abs(opts.Workdir)
-		if err != nil {
-			return protocol.InstanceManifest{}, err
-		}
+		workdir = opts.Workdir
 		if err := os.MkdirAll(workdir, 0o755); err != nil {
 			return protocol.InstanceManifest{}, err
 		}

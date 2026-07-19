@@ -26,6 +26,11 @@ type WorktreeStatus struct {
 }
 
 func (e *Engine) Status(sessionID string) (WorktreeStatus, error) {
+	return e.StatusContext(context.Background(), sessionID)
+}
+
+// StatusContext reports Session state and bounds Provider work with ctx.
+func (e *Engine) StatusContext(ctx context.Context, sessionID string) (WorktreeStatus, error) {
 	instance, err := e.readInstance(sessionID)
 	if err != nil {
 		return WorktreeStatus{}, err
@@ -44,7 +49,7 @@ func (e *Engine) Status(sessionID string) (WorktreeStatus, error) {
 		if !ok {
 			continue
 		}
-		changes, err := tracker.Status(context.Background(), component)
+		changes, err := tracker.Status(ctx, component)
 		if err != nil {
 			return status, fmt.Errorf("status component %q: %w", component.ID, err)
 		}
@@ -62,10 +67,15 @@ type AddOptions struct {
 }
 
 func (e *Engine) Add(sessionID string, paths []string) (protocol.InstanceManifest, error) {
-	return e.AddWithOptions(sessionID, paths, AddOptions{})
+	return e.AddWithOptionsContext(context.Background(), sessionID, paths, AddOptions{})
 }
 
 func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOptions) (protocol.InstanceManifest, error) {
+	return e.AddWithOptionsContext(context.Background(), sessionID, paths, opts)
+}
+
+// AddWithOptionsContext selects paths while bounding Provider work with ctx.
+func (e *Engine) AddWithOptionsContext(ctx context.Context, sessionID string, paths []string, opts AddOptions) (protocol.InstanceManifest, error) {
 	if len(paths) == 0 {
 		return protocol.InstanceManifest{}, fmt.Errorf("add requires at least one workspace path")
 	}
@@ -93,7 +103,7 @@ func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOption
 				if err != nil {
 					return protocol.InstanceManifest{}, err
 				}
-				if err := e.adoptDiscoveredChildren(context.Background(), &instance, p, component); err != nil {
+				if err := e.adoptDiscoveredChildren(ctx, &instance, p, component); err != nil {
 					return protocol.InstanceManifest{}, err
 				}
 				owner = deepestOwner(instance.Components, rel)
@@ -102,10 +112,10 @@ func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOption
 				}
 				component = instance.Components[owner]
 			}
-			if err := e.addThroughProvider(context.Background(), instance, component, rel); err != nil {
+			if err := e.addThroughProvider(ctx, instance, component, rel); err != nil {
 				return protocol.InstanceManifest{}, err
 			}
-			if err := e.trackParentBoundary(context.Background(), instance, component); err != nil {
+			if err := e.trackParentBoundary(ctx, instance, component); err != nil {
 				return protocol.InstanceManifest{}, err
 			}
 			continue
@@ -122,7 +132,7 @@ func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOption
 				return protocol.InstanceManifest{}, fmt.Errorf("requested provider %s@%s; installed contract is %s", opts.Provider, opts.Contract, p.Contract())
 			}
 		} else {
-			p, componentPath, componentTarget, err = e.discoverProviderRoot(context.Background(), instance.Paths.Workdir, rel, target)
+			p, componentPath, componentTarget, err = e.discoverProviderRoot(ctx, instance.Paths.Workdir, rel, target)
 			if err != nil {
 				return protocol.InstanceManifest{}, err
 			}
@@ -130,11 +140,11 @@ func (e *Engine) AddWithOptions(sessionID string, paths []string, opts AddOption
 		if componentAtPath(instance.Components, componentPath) >= 0 {
 			return protocol.InstanceManifest{}, fmt.Errorf("component root %q is already registered", componentPath)
 		}
-		ref, err := e.adoptComponentTree(context.Background(), &instance, p, componentPath, componentTarget)
+		ref, err := e.adoptComponentTree(ctx, &instance, p, componentPath, componentTarget)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}
-		if err := e.addThroughProvider(context.Background(), instance, ref, rel); err != nil {
+		if err := e.addThroughProvider(ctx, instance, ref, rel); err != nil {
 			return protocol.InstanceManifest{}, err
 		}
 	}

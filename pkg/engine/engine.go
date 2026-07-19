@@ -35,7 +35,7 @@ func (e *Engine) InitAt(_ context.Context, sessionID, workdir string) (protocol.
 	if !spec.ValidIdentifier(sessionID) {
 		return protocol.InstanceManifest{}, fmt.Errorf("invalid session id %q", sessionID)
 	}
-	absWorkdir, err := filepath.Abs(workdir)
+	absWorkdir, err := protocol.CanonicalPath(workdir)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}

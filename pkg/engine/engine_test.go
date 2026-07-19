@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/loop-exchange-protocol/go-sdk/pkg/bundle"
 	"github.com/loop-exchange-protocol/go-sdk/pkg/protocol"
@@ -20,6 +22,18 @@ type failingProvider struct{ fakeProvider }
 type planningProvider struct {
 	fakeProvider
 	seen *protocol.ResolvedRef
+}
+
+type blockingTracker struct{ fakeProvider }
+
+func (blockingTracker) Add(ctx context.Context, _ protocol.ResolvedRef, _ []string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (blockingTracker) Status(ctx context.Context, _ protocol.ResolvedRef) ([]provider.Change, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 func (failingProvider) Restore(context.Context, spec.Component, bundle.Store, provider.MaterializeTarget) (protocol.ResolvedRef, error) {
@@ -74,6 +88,24 @@ func TestPlanBundleUsesOnlyInjectedProvider(t *testing.T) {
 	writeReferenceArtifact(t, mismatchDir, "v2")
 	if _, err := New(filepath.Join(tmp, "mismatch-state"), fakeProvider{}).PlanBundle(context.Background(), mismatchDir); err == nil {
 		t.Fatal("mismatched Provider contract unexpectedly planned")
+	}
+}
+
+func TestAddWithOptionsContextPropagatesCancellationToProvider(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "work")
+	e := New(filepath.Join(workdir, ".lxp"), blockingTracker{})
+	if _, err := e.InitAt(context.Background(), "work", workdir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "owned.txt"), []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	_, err := e.AddWithOptionsContext(ctx, "work", []string{"owned.txt"}, AddOptions{Provider: "fake", Contract: "v1"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Add cancellation error = %v", err)
 	}
 }
 

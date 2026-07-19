@@ -2,6 +2,8 @@
 
 **English** | [中文主版本](README.md)
 
+[![CI](https://github.com/loop-exchange-protocol/go-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/loop-exchange-protocol/go-sdk/actions/workflows/ci.yml)
+
 This repository contains the Go SDK for the Loop Exchange Protocol: protocol types, Artifact/CAS support, Provider APIs, Engine, and Requirements. Concrete Providers are not part of the SDK; applications inject them explicitly.
 
 ```go
@@ -12,6 +14,19 @@ Provider authors implement `pkg/provider.Provider`, optionally `Tracker` for nat
 
 The generic Engine API supports `reference`, `embedded`, and `mirrored` as declared by each Provider, and passes the actual distribution, locator, and revision into Plan. Mirrored reference and embedded revisions must match. The exact contract defines safe locators, selected state, and fallback behavior.
 
+## Install the CLI
+
+The CLI is an independent Go module under `cmd/lxp`, so release tags use the `cmd/lxp/vX.Y.Z` prefix:
+
+```bash
+go install github.com/loop-exchange-protocol/go-sdk/cmd/lxp@latest
+lxp help
+```
+
+The first public-alpha version is `v0.1.0-alpha.1`; with no stable release, `@latest` selects the highest pre-release. Published modules contain no `replace` directives; the parent `go.work` composes all four repositories for local development.
+
+The CLI gives external operations a 15-minute deadline by default; override it with a positive Go duration such as `LXP_TIMEOUT=30m lxp import ...`. The Git Provider also disables interactive credential prompts, so authentication must already be available from a non-interactive credential helper or SSH agent. Session storage and discovery use physical paths with symlinked prefixes resolved, preventing macOS `/var` and `/private/var` from being treated as different Workdirs.
+
 ## Verification
 
 ```bash
@@ -20,10 +35,10 @@ go vet ./...
 cd cmd/lxp && go test -race ./... && go vet ./...
 ```
 
-`cmd/lxp` is a nested module and the official Production MVP composition root. It combines this SDK with `go-provider-git` only. Its public commands are `init/add/status/export/import/inspect/requirements`; `lxp export --distribution` supports reference/embedded/mirrored `.lxpz` (default: embedded), and Import reads the Artifact declaration automatically. Local `replace` directives support adjacent-repository development and must become released versions for distribution.
+`cmd/lxp` is a nested module and the official Production MVP composition root. It combines this SDK with `go-provider-git` only. Its public commands are `init/add/status/export/import/inspect/requirements`; `lxp export --distribution` supports reference/embedded/mirrored `.lxpz` (default: embedded), and Import reads the Artifact declaration automatically.
 
 The real four-repository Harness in `go-provider-git` directly verifies online reference Import, offline reference failure/cleanup, and offline mirrored fallback through this public CLI.
 
 CLI integration tests use parent, child, and grandchild remotes to cover automatic recursive Git-submodule registration, all three distributions, offline child restore, a child commit, and staged parent-gitlink selection.
 
-The current `v1alpha1` release makes no compatibility promise and supports trusted Artifacts only.
+The protocol is `v1alpha1`, while Go modules use `v0.x` alpha tags. Neither carries a compatibility promise, and only trusted Artifacts are supported.

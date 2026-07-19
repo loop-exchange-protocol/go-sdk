@@ -2,9 +2,12 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/loop-exchange-protocol/go-sdk/pkg/spec"
 )
@@ -56,5 +59,27 @@ func TestExecutableProbeRequiresPolicy(t *testing.T) {
 	_, err := Resolve(context.Background(), []spec.Requirement{{ID: "git", Check: spec.Check{Type: "executable", Command: "git"}}}, map[string]bool{"git": true}, Options{})
 	if err == nil {
 		t.Fatal("expected executable policy rejection")
+	}
+}
+
+func TestMCPProbeHonorsCallerDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	dir := t.TempDir()
+	server := filepath.Join(dir, "blocking-mcp")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := Resolve(ctx, []spec.Requirement{{ID: "blocking", Check: spec.Check{Type: "mcp", Command: "blocking-mcp"}}}, map[string]bool{"blocking": true}, Options{AllowMCP: true})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Resolve error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("MCP cancellation took %s", elapsed)
 	}
 }
