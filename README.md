@@ -39,6 +39,6 @@ cd cmd/lxp && go test -race ./... && go vet ./...
 
 真实四仓库 Harness 位于 `go-provider-git`，并直接验证上述公开 CLI 的 reference 在线导入、reference 离线失败清理与 mirrored 离线 fallback。
 
-CLI 集成测试还用 parent/child/grandchild 三个 remote 覆盖自动注册递归 Git submodule、三种 distribution、offline child 恢复、child commit 与父 gitlink staged selection。
+CLI 集成测试还用 parent/child/grandchild 三个 remote 覆盖自动注册递归 Git submodule、三种 distribution、offline child 恢复、Import 后父仓 native submodule config/递归 status 一致、child commit 与父 gitlink staged selection。
 
 协议版本为 `v1alpha1`，Go module 使用 `v0.x` alpha tag；两者都不承诺兼容性，并仅面向可信 Artifact。

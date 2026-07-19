@@ -3,7 +3,7 @@ module github.com/loop-exchange-protocol/go-sdk/cmd/lxp
 go 1.22
 
 require (
-	github.com/loop-exchange-protocol/go-provider-git v0.1.0-alpha.1
+	github.com/loop-exchange-protocol/go-provider-git v0.1.0-alpha.2
 	github.com/loop-exchange-protocol/go-sdk v0.1.0-alpha.1
 )
 

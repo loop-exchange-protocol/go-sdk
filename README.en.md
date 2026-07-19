@@ -39,6 +39,6 @@ cd cmd/lxp && go test -race ./... && go vet ./...
 
 The real four-repository Harness in `go-provider-git` directly verifies online reference Import, offline reference failure/cleanup, and offline mirrored fallback through this public CLI.
 
-CLI integration tests use parent, child, and grandchild remotes to cover automatic recursive Git-submodule registration, all three distributions, offline child restore, a child commit, and staged parent-gitlink selection.
+CLI integration tests use parent, child, and grandchild remotes to cover automatic recursive Git-submodule registration, all three distributions, offline child restore, consistent parent native submodule config/recursive status after Import, a child commit, and staged parent-gitlink selection.
 
 The protocol is `v1alpha1`, while Go modules use `v0.x` alpha tags. Neither carries a compatibility promise, and only trusted Artifacts are supported.

@@ -358,6 +358,7 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 	if err := run(ctx, []string{"import", artifacts["reference"], online}); err != nil {
 		t.Fatal(err)
 	}
+	assertInitializedSubmodules(t, filepath.Join(online, "source"), 2)
 	stopParent()
 	stopChild()
 	stopGrandchild()
@@ -381,6 +382,7 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 		if err != nil || string(grandchildContent) != "recursive\n" {
 			t.Fatalf("%s recursive content = %q, %v", distribution, grandchildContent, err)
 		}
+		assertInitializedSubmodules(t, filepath.Join(target, "source"), 2)
 	}
 	advancedTarget := filepath.Join(tmp, "embedded-submodule-advanced-offline")
 	if err := run(ctx, []string{"import", advancedEmbedded, advancedTarget}); err != nil {
@@ -393,6 +395,7 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 	if staged := strings.TrimSpace(mustGitText(t, filepath.Join(advancedTarget, "source"), "diff", "--cached", "--name-only")); staged != "deps/child" {
 		t.Fatalf("restored parent gitlink selection = %q", staged)
 	}
+	assertInitializedSubmodules(t, filepath.Join(advancedTarget, "source"), 2)
 }
 
 func TestProductionProfileRejectsUnknownGitPayloadRole(t *testing.T) {
@@ -498,4 +501,18 @@ func mustGitText(t *testing.T, dir string, args ...string) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+func assertInitializedSubmodules(t *testing.T, root string, want int) {
+	t.Helper()
+	output := strings.TrimSuffix(mustGitText(t, root, "submodule", "status", "--recursive"), "\n")
+	lines := strings.Split(output, "\n")
+	if output == "" || len(lines) != want {
+		t.Fatalf("recursive submodule status = %q, want %d entries", output, want)
+	}
+	for _, line := range lines {
+		if line == "" || line[0] != ' ' {
+			t.Fatalf("submodule is not initialized consistently: %q", line)
+		}
+	}
 }
