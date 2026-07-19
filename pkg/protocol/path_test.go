@@ -20,7 +20,10 @@ func TestCanonicalPathResolvesExistingSymlinkPrefixForMissingTarget(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(physical, "session", "work")
+	want, err := CanonicalPath(filepath.Join(physical, "session", "work"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != want {
 		t.Fatalf("canonical path = %q, want %q", got, want)
 	}

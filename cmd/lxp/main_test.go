@@ -137,12 +137,16 @@ func TestSessionDiscoveryNormalizesPhysicalPathAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	physicalWorkdir := filepath.Join(physicalParent, "work")
+	canonicalWorkdir, err := protocol.CanonicalPath(physicalWorkdir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	instance, err := protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(physicalWorkdir, ".lxp", "sessions", "work", "manifest.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if instance.Paths.Workdir != physicalWorkdir {
-		t.Fatalf("stored workdir = %q, want physical path %q", instance.Paths.Workdir, physicalWorkdir)
+	if instance.Paths.Workdir != canonicalWorkdir {
+		t.Fatalf("stored workdir = %q, want physical path %q", instance.Paths.Workdir, canonicalWorkdir)
 	}
 	old, err := os.Getwd()
 	if err != nil {
@@ -156,7 +160,7 @@ func TestSessionDiscoveryNormalizesPhysicalPathAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolvedRoot != filepath.Join(physicalWorkdir, ".lxp") || sessionID != "work" {
+	if resolvedRoot != filepath.Join(canonicalWorkdir, ".lxp") || sessionID != "work" {
 		t.Fatalf("resolved session = %q, %q", resolvedRoot, sessionID)
 	}
 }
