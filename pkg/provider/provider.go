@@ -44,8 +44,9 @@ type Tracker interface {
 	Status(ctx context.Context, ref protocol.ResolvedRef) ([]Change, error)
 }
 
-// NestedDiscoverer reports initialized native child roots. Core registers each
-// returned root as a nested Component and recursively asks its owning Provider.
+// NestedDiscoverer prepares and reports Provider-native direct child roots.
+// Core registers each returned root as a nested Component and recursively asks
+// its owning Provider. Any preparation side effects are contract-defined.
 type NestedDiscoverer interface {
 	DiscoverChildren(ctx context.Context, ref protocol.ResolvedRef) ([]string, error)
 }

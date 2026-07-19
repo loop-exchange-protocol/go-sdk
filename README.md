@@ -8,7 +8,7 @@
 e := engine.New(stateRoot, providers...)
 ```
 
-Provider 作者主要实现 `pkg/provider.Provider`，需要原生变更选择时额外实现 `Tracker`，需要接管既有目录时实现 `Adopter`。`NestedDiscoverer` 可返回 Provider-native child roots，`BoundaryTracker` 可同步 gitlink 等父边界 metadata。Engine 由 lexical path 推导嵌套拓扑，普通操作路由到最深 root，Import 父到子、Export 子到父；Artifact 不包含 mount capability DSL。协议规范、Schema 与权威示例位于 [`loop-exchange-protocol`](https://github.com/loop-exchange-protocol/loop-exchange-protocol)。
+Provider 作者主要实现 `pkg/provider.Provider`，需要原生变更选择时额外实现 `Tracker`，需要接管既有目录时实现 `Adopter`。`NestedDiscoverer` 可按 contract 准备并返回 Provider-native direct child roots，`BoundaryTracker` 可同步 gitlink 等父边界 metadata。Engine 由 lexical path 推导嵌套拓扑，普通操作路由到最深 root，Import 父到子、Export 子到父；Artifact 不包含 mount capability DSL。协议规范、Schema 与权威示例位于 [`loop-exchange-protocol`](https://github.com/loop-exchange-protocol/loop-exchange-protocol)。
 
 通用 Engine API 按 Provider 声明支持 `reference`、`embedded` 与 `mirrored`，并在 Plan 中传递实际 distribution、locator 与 revision。Mirrored 的 reference/embedded revision 必须相同。具体安全 locator、selected state 与 fallback 由匹配的 Provider contract 实现。
 

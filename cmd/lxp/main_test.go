@@ -236,7 +236,10 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 	if err := run(ctx, []string{"init", work}); err != nil {
 		t.Fatal(err)
 	}
-	mustGit(t, "", "clone", "--recurse-submodules", parentRemote, filepath.Join(work, "source"))
+	mustGit(t, "", "clone", parentRemote, filepath.Join(work, "source"))
+	if _, err := os.Stat(filepath.Join(work, "source", "deps", "child", ".git")); !os.IsNotExist(err) {
+		t.Fatalf("submodule unexpectedly initialized before lxp add: %v", err)
+	}
 	old, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +250,14 @@ func TestCLINestedSubmoduleAllDistributions(t *testing.T) {
 	}
 	if err := run(ctx, []string{"add", "source"}); err != nil {
 		t.Fatal(err)
+	}
+	for _, gitDir := range []string{
+		filepath.Join(work, "source", "deps", "child", ".git"),
+		filepath.Join(work, "source", "deps", "child", "deps", "grandchild", ".git"),
+	} {
+		if info, err := os.Stat(gitDir); err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
+			t.Fatalf("lxp add did not recursively initialize %s: %v", gitDir, err)
+		}
 	}
 	instance, err := protocol.ReadYAML[protocol.InstanceManifest](filepath.Join(work, ".lxp", "sessions", "work", "manifest.yaml"))
 	if err != nil {
