@@ -1,5 +1,9 @@
 github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/loop-exchange-protocol/lxp v0.1.0-alpha.3 h1:ldwJf95fbayHNZ2UcQN3nvrO2vvZBDO/P3/RHaDBtjo=
+github.com/loop-exchange-protocol/lxp v0.1.0-alpha.3/go.mod h1:eXYwnY3FdpD6BcbN1vNzLYgY4AsDZ63IIQUM4kBhl9c=
+github.com/loop-exchange-protocol/provider-git v0.1.0-alpha.3 h1:H5x1zYx6g4ag7GiqkB35Xzc7/MkJ/RYsFA7HRoJe6iA=
+github.com/loop-exchange-protocol/provider-git v0.1.0-alpha.3/go.mod h1:49wSCwVqNGcM2+vvVyW8dH2EhaoyTOnvpRKbCu///bo=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06 h1:OkMGxebDjyw0ULyrTYWeN0UNCCkmCWfjPnIA2W6oviI=
