@@ -36,17 +36,17 @@ type ResolvedRef struct {
 	Materialized string            `yaml:"materialized,omitempty" json:"materialized,omitempty"`
 	Metadata     map[string]string `yaml:"metadata,omitempty" json:"metadata,omitempty"`
 	Requires     []string          `yaml:"requires,omitempty" json:"requires,omitempty"`
-	Children     []ChildComponent  `yaml:"-" json:"-"`
+	Children     []ChildComponent  `yaml:"-" json:"children,omitempty"`
 }
 
 // ChildComponent describes a direct nested Component to its parent Provider.
 // Path is relative to the parent root. The field is runtime orchestration
 // context and is never serialized into portable or local manifests.
 type ChildComponent struct {
-	ID       string
-	Path     string
-	Provider spec.Contract
-	Revision string
+	ID       string        `json:"id"`
+	Path     string        `json:"path"`
+	Provider spec.Contract `json:"provider"`
+	Revision string        `json:"revision"`
 }
 
 type InstancePaths struct {

@@ -15,9 +15,13 @@ import (
 )
 
 func RunChecklist(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts Options, in io.Reader, out io.Writer) (Options, error) {
+	return RunChecklistWithRegistry(ctx, DefaultRegistry(), requirements, required, opts, in, out)
+}
+
+func RunChecklistWithRegistry(ctx context.Context, registry *Registry, requirements []spec.Requirement, required map[string]bool, opts Options, in io.Reader, out io.Writer) (Options, error) {
 	reader := bufio.NewReader(in)
 	for {
-		items := Check(ctx, requirements, required, opts)
+		items := CheckWithRegistry(ctx, registry, requirements, required, opts)
 		renderChecklist(out, items)
 		if AllRequiredReady(items) {
 			fmt.Fprintln(out, "\nAll required items are ready.")

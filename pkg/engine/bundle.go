@@ -71,12 +71,12 @@ func (e *Engine) ValidateBundle(ctx context.Context, path string) (spec.Artifact
 		return spec.Artifact{}, err
 	}
 	defer os.RemoveAll(stage)
-	if err := e.validateExtensions(artifact); err != nil {
+	if err := e.validateExtensions(ctx, artifact); err != nil {
 		return spec.Artifact{}, err
 	}
 	store := bundle.Store{Root: stage}
 	for _, component := range sortedArtifact(artifact.Components, true) {
-		p, err := e.providerFor(component.Provider)
+		p, err := e.providerFor(ctx, component.Provider)
 		if err != nil {
 			return spec.Artifact{}, err
 		}
@@ -117,15 +117,15 @@ func (e *Engine) stageBundle(path string) (string, spec.Artifact, string, error)
 	return stage, artifact, digest, nil
 }
 
-func (e *Engine) validateExtensions(artifact spec.Artifact) error {
-	_, err := e.resolveExtensions(artifact)
+func (e *Engine) validateExtensions(ctx context.Context, artifact spec.Artifact) error {
+	_, err := e.resolveExtensions(ctx, artifact)
 	return err
 }
 
-func (e *Engine) resolveExtensions(artifact spec.Artifact) ([]protocol.ExtensionResolution, error) {
+func (e *Engine) resolveExtensions(ctx context.Context, artifact spec.Artifact) ([]protocol.ExtensionResolution, error) {
 	resolved := map[string]protocol.ExtensionResolution{}
 	for _, component := range artifact.Components {
-		p, err := e.providerFor(component.Provider)
+		p, err := e.providerFor(ctx, component.Provider)
 		if err != nil {
 			return nil, fmt.Errorf("component %q: %w", component.ID, err)
 		}
@@ -133,7 +133,7 @@ func (e *Engine) resolveExtensions(artifact spec.Artifact) ([]protocol.Extension
 		resolved[component.Provider.String()] = protocol.ExtensionResolution{Kind: "provider", Contract: component.Provider, Source: implementation.Source, Implementation: p.Implementation(), Digest: implementation.Digest}
 	}
 	for _, requirement := range artifact.Requirements {
-		checker, err := e.checkerFor(requirement.Check.Checker)
+		checker, err := e.checkerFor(ctx, requirement.Check.Checker)
 		if err != nil {
 			return nil, fmt.Errorf("requirement %q: %w", requirement.ID, err)
 		}
@@ -146,6 +146,48 @@ func (e *Engine) resolveExtensions(artifact spec.Artifact) ([]protocol.Extension
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Contract.String() < out[j].Contract.String() })
 	return out, nil
+}
+
+func (e *Engine) requirementRegistry(ctx context.Context, requirements []spec.Requirement) (*lxpruntime.Registry, error) {
+	seen := map[string]bool{}
+	checkers := make([]lxpruntime.Checker, 0, len(requirements))
+	for _, requirement := range requirements {
+		key := requirement.Check.Checker.String()
+		if seen[key] {
+			continue
+		}
+		checker, err := e.checkerFor(ctx, requirement.Check.Checker)
+		if err != nil {
+			return nil, err
+		}
+		seen[key] = true
+		checkers = append(checkers, checker)
+	}
+	return lxpruntime.NewRegistry(checkers...), nil
+}
+
+func (e *Engine) resolveRequirements(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts lxpruntime.Options) ([]lxpruntime.Observation, error) {
+	registry, err := e.requirementRegistry(ctx, requirements)
+	if err != nil {
+		return nil, err
+	}
+	return registry.Resolve(ctx, requirements, required, opts)
+}
+
+func (e *Engine) CheckRequirements(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts lxpruntime.Options) ([]lxpruntime.CheckItem, error) {
+	registry, err := e.requirementRegistry(ctx, requirements)
+	if err != nil {
+		return nil, err
+	}
+	return lxpruntime.CheckWithRegistry(ctx, registry, requirements, required, opts), nil
+}
+
+func (e *Engine) RunRequirementChecklist(ctx context.Context, requirements []spec.Requirement, required map[string]bool, opts lxpruntime.Options, in io.Reader, out io.Writer) (lxpruntime.Options, error) {
+	registry, err := e.requirementRegistry(ctx, requirements)
+	if err != nil {
+		return opts, err
+	}
+	return lxpruntime.RunChecklistWithRegistry(ctx, registry, requirements, required, opts, in, out)
 }
 
 func sameExtensionResolutions(a, b []protocol.ExtensionResolution) bool {
@@ -206,12 +248,12 @@ func (e *Engine) Export(ctx context.Context, opts ExportOptions) (string, error)
 		Kind:         spec.Kind,
 		Coordinates:  spec.Coordinates{Namespace: opts.Namespace, Name: opts.Name, Version: opts.Version, Variant: "checkpoint"},
 		Requirements: instance.Requirements,
-		Provenance:   spec.Provenance{CreatedAt: time.Now().UTC().Format(time.RFC3339), Engine: "lxp/0.1.0", Parent: instance.Metadata["parent_artifact"]},
+		Provenance:   spec.Provenance{CreatedAt: time.Now().UTC().Format(time.RFC3339), Engine: "lxp/0.1.0-alpha.4", Parent: instance.Metadata["parent_artifact"]},
 	}
 	portableByID := make(map[string]spec.Component, len(instance.Components))
 	revisions := make(map[string]string, len(instance.Components))
 	for _, ref := range sortedResolved(instance.Components, false) {
-		p, err := e.providerFor(ref.Provider)
+		p, err := e.providerFor(ctx, ref.Provider)
 		if err != nil {
 			return "", err
 		}
@@ -291,7 +333,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 	if existing.Metadata["import_state"] == "ready" {
 		return existing, nil
 	}
-	resolutions, err := e.resolveExtensions(artifact)
+	resolutions, err := e.resolveExtensions(ctx, artifact)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
@@ -300,7 +342,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 	}
 	store := bundle.Store{Root: stage}
 	runtimeOptions := lxpruntime.Options{SecretEnv: opts.SecretEnv, AllowMCP: opts.AllowMCP, AllowExecutables: opts.AllowExecutables}
-	observations, err := e.Checkers.Resolve(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), runtimeOptions)
+	observations, err := e.resolveRequirements(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), runtimeOptions)
 	if err != nil {
 		return protocol.InstanceManifest{}, err
 	}
@@ -309,7 +351,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}
-		p, err := e.providerFor(component.Provider)
+		p, err := e.providerFor(ctx, component.Provider)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}
@@ -344,7 +386,7 @@ func (e *Engine) ImportBundle(ctx context.Context, opts BundleImportOptions) (pr
 			continue
 		}
 		target, _ := bundle.SafeJoin(workdir, component.Path)
-		p, err := e.providerFor(component.Provider)
+		p, err := e.providerFor(ctx, component.Provider)
 		if err != nil {
 			return protocol.InstanceManifest{}, err
 		}

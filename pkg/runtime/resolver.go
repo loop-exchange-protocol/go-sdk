@@ -19,18 +19,18 @@ import (
 )
 
 type Options struct {
-	SecretEnv        map[string]string
-	AllowMCP         bool
-	AllowExecutables bool
+	SecretEnv        map[string]string `json:"secret_env,omitempty"`
+	AllowMCP         bool              `json:"allow_mcp,omitempty"`
+	AllowExecutables bool              `json:"allow_executables,omitempty"`
 }
 
 var (
 	ExecutableContract       = spec.Contract{Namespace: "loop.exchange", Name: "executable", Version: "v1"}
 	MCPContract              = spec.Contract{Namespace: "loop.exchange", Name: "mcp", Version: "v1"}
 	CredentialContract       = spec.Contract{Namespace: "loop.exchange", Name: "credential", Version: "v1"}
-	ExecutableImplementation = spec.Contract{Namespace: "loop.exchange", Name: "checker-executable", Version: "0.1.0-alpha.3"}
-	MCPImplementation        = spec.Contract{Namespace: "loop.exchange", Name: "checker-mcp", Version: "0.1.0-alpha.3"}
-	CredentialImplementation = spec.Contract{Namespace: "loop.exchange", Name: "checker-credential", Version: "0.1.0-alpha.3"}
+	ExecutableImplementation = spec.Contract{Namespace: "loop.exchange", Name: "checker-executable", Version: "0.1.0-alpha.4"}
+	MCPImplementation        = spec.Contract{Namespace: "loop.exchange", Name: "checker-mcp", Version: "0.1.0-alpha.4"}
+	CredentialImplementation = spec.Contract{Namespace: "loop.exchange", Name: "checker-credential", Version: "0.1.0-alpha.4"}
 )
 
 type Observation struct {
@@ -294,7 +294,7 @@ func resolveMCP(ctx context.Context, req spec.Requirement, opts Options) (Observ
 	enc := json.NewEncoder(stdin)
 	dec := bufio.NewScanner(stdout)
 	dec.Buffer(make([]byte, 64<<10), maxMCPMessageBytes)
-	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "lxp", "version": "0.1.0"}}}); err != nil {
+	if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "lxp", "version": "0.1.0-alpha.4"}}}); err != nil {
 		return Observation{}, err
 	}
 	if _, err := scanResponse(cmdCtx, dec, stdout, 1); err != nil {

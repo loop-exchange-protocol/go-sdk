@@ -25,9 +25,11 @@ type Config struct {
 }
 
 type Repository struct {
-	ID         string `yaml:"id" json:"id"`
-	URL        string `yaml:"url" json:"url"`
-	Credential string `yaml:"credential,omitempty" json:"credential,omitempty"`
+	ID                string   `yaml:"id" json:"id"`
+	URL               string   `yaml:"url" json:"url"`
+	Credential        string   `yaml:"credential,omitempty" json:"credential,omitempty"`
+	AutoInstall       bool     `yaml:"auto_install,omitempty" json:"auto_install,omitempty"`
+	TrustedNamespaces []string `yaml:"trusted_namespaces,omitempty" json:"trusted_namespaces,omitempty"`
 }
 
 type Binding struct {
@@ -40,12 +42,16 @@ type Implementation struct {
 	Source  string        `yaml:"source" json:"source"`
 	Package spec.Contract `yaml:"package" json:"package"`
 	Digest  string        `yaml:"digest,omitempty" json:"digest,omitempty"`
+	Command []string      `yaml:"command,omitempty" json:"command,omitempty"`
 }
 
 func Default() Config {
 	return Config{
 		APIVersion: spec.APIVersion,
 		Kind:       "EngineConfig",
+		Repositories: []Repository{{
+			ID: "official", URL: "oci://ghcr.io/loop-exchange-protocol", AutoInstall: true, TrustedNamespaces: []string{"loop.exchange"},
+		}},
 		Bindings: []Binding{
 			builtin(KindProvider, spec.Contract{Namespace: "loop.exchange", Name: "git", Version: "v1"}, "provider-git"),
 			builtinImplementation(KindChecker, runtime.ExecutableContract, runtime.ExecutableImplementation),
@@ -56,7 +62,7 @@ func Default() Config {
 }
 
 func builtin(kind string, contract spec.Contract, packageName string) Binding {
-	return builtinImplementation(kind, contract, spec.Contract{Namespace: "loop.exchange", Name: packageName, Version: "0.1.0-alpha.3"})
+	return builtinImplementation(kind, contract, spec.Contract{Namespace: "loop.exchange", Name: packageName, Version: "0.1.0-alpha.4"})
 }
 
 func builtinImplementation(kind string, contract, implementation spec.Contract) Binding {
@@ -94,11 +100,21 @@ func (c Config) Validate() error {
 			return fmt.Errorf("invalid or duplicate extension repository %q", repository.ID)
 		}
 		parsed, err := url.Parse(repository.URL)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		if err != nil || (parsed.Scheme != "oci" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return fmt.Errorf("extension repository %q must use an absolute URL without inline credentials", repository.ID)
 		}
 		if repository.Credential != "" && !spec.ValidIdentifier(repository.Credential) {
 			return fmt.Errorf("extension repository %q has an invalid credential slot", repository.ID)
+		}
+		if repository.AutoInstall && len(repository.TrustedNamespaces) == 0 {
+			return fmt.Errorf("auto-install repository %q requires trusted_namespaces", repository.ID)
+		}
+		trusted := map[string]bool{}
+		for _, namespace := range repository.TrustedNamespaces {
+			if !validNamespace(namespace) || trusted[namespace] {
+				return fmt.Errorf("extension repository %q has an invalid or duplicate trusted namespace %q", repository.ID, namespace)
+			}
+			trusted[namespace] = true
 		}
 		repositories[repository.ID] = true
 	}
@@ -117,18 +133,55 @@ func (c Config) Validate() error {
 		bindings[key] = true
 		switch binding.Implementation.Source {
 		case "builtin":
-			if binding.Implementation.Digest != "" {
-				return fmt.Errorf("builtin extension %s must not declare a digest", binding.Contract.String())
+			if binding.Implementation.Digest != "" || len(binding.Implementation.Command) != 0 {
+				return fmt.Errorf("builtin extension %s must not declare digest or command", binding.Contract.String())
+			}
+		case "helper":
+			if binding.Implementation.Digest != "" || !validCommand(binding.Implementation.Command) {
+				return fmt.Errorf("helper extension %s requires a command and must not declare a digest", binding.Contract.String())
 			}
 		case "repository":
-			if len(c.Repositories) == 0 || !validDigest(binding.Implementation.Digest) {
-				return fmt.Errorf("repository extension %s requires an ordered repository list and SHA-256 digest", binding.Contract.String())
+			if len(c.Repositories) == 0 || !validDigest(binding.Implementation.Digest) || len(binding.Implementation.Command) != 0 {
+				return fmt.Errorf("repository extension %s requires an ordered repository list and SHA-256 digest, and must not declare a command", binding.Contract.String())
+			}
+			if !c.authorizes(binding.Implementation.Package.Namespace) {
+				return fmt.Errorf("repository extension %s has no auto-install repository trusted for namespace %q", binding.Contract.String(), binding.Implementation.Package.Namespace)
 			}
 		default:
 			return fmt.Errorf("extension %s has unsupported source %q", binding.Contract.String(), binding.Implementation.Source)
 		}
 	}
 	return nil
+}
+
+func (c Config) authorizes(namespace string) bool {
+	for _, repository := range c.Repositories {
+		if !repository.AutoInstall {
+			continue
+		}
+		for _, trusted := range repository.TrustedNamespaces {
+			if trusted == namespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validNamespace(namespace string) bool {
+	return (spec.Contract{Namespace: namespace, Name: "extension", Version: "v1"}).Valid()
+}
+
+func validCommand(command []string) bool {
+	if len(command) == 0 || command[0] == "" {
+		return false
+	}
+	for _, value := range command {
+		if value == "" || bytes.IndexByte([]byte(value), 0) >= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (c Config) Resolve(kind string, contract spec.Contract) (Implementation, error) {

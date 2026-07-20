@@ -42,7 +42,7 @@ func (e *Engine) StatusContext(ctx context.Context, sessionID string) (WorktreeS
 	}
 	for _, component := range sortedResolved(instance.Components, true) {
 		component.Children = directResolvedChildren(component, instance.Components, nil)
-		p, err := e.providerFor(component.Provider)
+		p, err := e.providerFor(ctx, component.Provider)
 		if err != nil {
 			return status, err
 		}
@@ -99,7 +99,7 @@ func (e *Engine) AddWithOptionsContext(ctx context.Context, sessionID string, pa
 				return protocol.InstanceManifest{}, fmt.Errorf("path %q is owned by %s, not requested %s", rel, component.Provider.String(), opts.Provider.String())
 			}
 			if !opts.Provider.Valid() {
-				p, err := e.providerFor(component.Provider)
+				p, err := e.providerFor(ctx, component.Provider)
 				if err != nil {
 					return protocol.InstanceManifest{}, err
 				}
@@ -124,7 +124,7 @@ func (e *Engine) AddWithOptionsContext(ctx context.Context, sessionID string, pa
 		componentPath := rel
 		componentTarget := target
 		if opts.Provider.Valid() {
-			p, err = e.providerFor(opts.Provider)
+			p, err = e.providerFor(ctx, opts.Provider)
 			if err != nil {
 				return protocol.InstanceManifest{}, err
 			}
@@ -214,7 +214,7 @@ func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol
 		}
 		if existing := componentAtPath(instance.Components, childPath); existing >= 0 {
 			child := instance.Components[existing]
-			childProvider, err := e.providerFor(child.Provider)
+			childProvider, err := e.providerFor(ctx, child.Provider)
 			if err != nil {
 				return err
 			}
@@ -224,7 +224,7 @@ func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol
 			continue
 		}
 		childTarget := filepath.Join(ref.Materialized, filepath.FromSlash(cleanRelative))
-		candidates, err := e.discoveryProviders()
+		candidates, err := e.discoveryProviders(ctx)
 		if err != nil {
 			return fmt.Errorf("nested component %q: %w", childPath, err)
 		}
@@ -243,7 +243,7 @@ func (e *Engine) adoptDiscoveredChildren(ctx context.Context, instance *protocol
 }
 
 func (e *Engine) addThroughProvider(ctx context.Context, instance protocol.InstanceManifest, component protocol.ResolvedRef, workspacePath string) error {
-	p, err := e.providerFor(component.Provider)
+	p, err := e.providerFor(ctx, component.Provider)
 	if err != nil {
 		return err
 	}
@@ -276,7 +276,7 @@ func (e *Engine) trackParentBoundary(ctx context.Context, instance protocol.Inst
 		return nil
 	}
 	parent := instance.Components[parentIndex]
-	p, err := e.providerFor(parent.Provider)
+	p, err := e.providerFor(ctx, parent.Provider)
 	if err != nil {
 		return err
 	}
@@ -292,7 +292,7 @@ func (e *Engine) trackParentBoundary(ctx context.Context, instance protocol.Inst
 }
 
 func (e *Engine) discoverProviderRoot(ctx context.Context, workdir, rel, target string) (provider.Provider, string, string, error) {
-	candidates, err := e.discoveryProviders()
+	candidates, err := e.discoveryProviders(ctx)
 	if err != nil {
 		return nil, "", "", err
 	}

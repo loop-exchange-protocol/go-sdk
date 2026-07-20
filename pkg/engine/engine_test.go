@@ -23,7 +23,7 @@ type fakeProvider struct{}
 
 func (fakeProvider) Contract() spec.Contract { return fakeContract }
 func (fakeProvider) Implementation() spec.Contract {
-	return spec.Contract{Namespace: "loop.exchange", Name: "provider-git", Version: "0.1.0-alpha.3"}
+	return spec.Contract{Namespace: "loop.exchange", Name: "provider-git", Version: "0.1.0-alpha.4"}
 }
 func (fakeProvider) Match(context.Context, string) (int, error) { return 1, nil }
 func (fakeProvider) Distributions() []string                    { return []string{"reference", "embedded"} }

@@ -3,11 +3,16 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/loop-exchange-protocol/lxp/pkg/extension"
+	extensionoci "github.com/loop-exchange-protocol/lxp/pkg/extension/oci"
+	"github.com/loop-exchange-protocol/lxp/pkg/helper"
 	"github.com/loop-exchange-protocol/lxp/pkg/protocol"
 	"github.com/loop-exchange-protocol/lxp/pkg/provider"
 	lxpruntime "github.com/loop-exchange-protocol/lxp/pkg/runtime"
@@ -15,94 +20,134 @@ import (
 )
 
 type Engine struct {
-	Root       string
-	Providers  *provider.Registry
-	Checkers   *lxpruntime.Registry
-	Extensions extension.Config
+	Root            string
+	Providers       *provider.Registry
+	Checkers        *lxpruntime.Registry
+	Extensions      extension.Config
+	helperMu        sync.Mutex
+	helperProviders map[string]provider.Provider
+	helperCheckers  map[string]lxpruntime.Checker
+	helperClosers   []io.Closer
 }
 
-// New constructs an Engine from explicitly supplied providers. The SDK never
-// installs concrete providers implicitly; applications are the composition root.
+// New constructs an Engine from explicitly supplied builtin Providers. Local
+// EngineConfig may additionally activate exact Helper bindings.
 func New(root string, providers ...provider.Provider) *Engine {
-	return &Engine{Root: root, Providers: provider.NewRegistry(providers...), Checkers: lxpruntime.DefaultRegistry(), Extensions: extension.Default()}
+	return NewWithConfig(root, extension.Default(), lxpruntime.DefaultRegistry(), providers...)
 }
 
 func NewWithConfig(root string, config extension.Config, checkers *lxpruntime.Registry, providers ...provider.Provider) *Engine {
 	if checkers == nil {
 		checkers = lxpruntime.NewRegistry()
 	}
-	return &Engine{Root: root, Providers: provider.NewRegistry(providers...), Checkers: checkers, Extensions: config}
+	return &Engine{Root: root, Providers: provider.NewRegistry(providers...), Checkers: checkers, Extensions: config, helperProviders: map[string]provider.Provider{}, helperCheckers: map[string]lxpruntime.Checker{}}
 }
 
-func (e *Engine) providerFor(contract spec.Contract) (provider.Provider, error) {
+func (e *Engine) providerFor(ctx context.Context, contract spec.Contract) (provider.Provider, error) {
 	implementation, err := e.Extensions.Resolve(extension.KindProvider, contract)
 	if err != nil {
 		return nil, err
 	}
-	if implementation.Source != "builtin" {
-		return nil, fmt.Errorf("implementation %s for %s is not installed; this Engine does not auto-install repository extensions", implementation.Package.String(), contract.String())
+	if implementation.Source == "builtin" {
+		p, err := e.Providers.Get(contract)
+		if err != nil {
+			return nil, err
+		}
+		if p.Implementation() != implementation.Package {
+			return nil, fmt.Errorf("Provider %s is bound to %s but installed implementation is %s", contract.String(), implementation.Package.String(), p.Implementation().String())
+		}
+		return p, nil
 	}
-	p, err := e.Providers.Get(contract)
+	e.helperMu.Lock()
+	defer e.helperMu.Unlock()
+	if cached := e.helperProviders[contract.String()]; cached != nil {
+		return cached, nil
+	}
+	command := implementation.Command
+	if implementation.Source == "repository" {
+		command, err = extensionoci.Install(ctx, extension.KindProvider, contract, implementation, e.Extensions.Repositories)
+		if err != nil {
+			return nil, fmt.Errorf("install Provider %s: %w", contract.String(), err)
+		}
+	}
+	p, err := helper.NewProvider(ctx, e.Root, contract, implementation, command)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("activate Provider %s: %w", contract.String(), err)
 	}
-	if p.Implementation() != implementation.Package {
-		return nil, fmt.Errorf("Provider %s is bound to %s but installed implementation is %s", contract.String(), implementation.Package.String(), p.Implementation().String())
-	}
+	e.helperProviders[contract.String()] = p
+	e.helperClosers = append(e.helperClosers, p)
 	return p, nil
 }
 
-func (e *Engine) checkerFor(contract spec.Contract) (lxpruntime.Checker, error) {
+func (e *Engine) checkerFor(ctx context.Context, contract spec.Contract) (lxpruntime.Checker, error) {
 	implementation, err := e.Extensions.Resolve(extension.KindChecker, contract)
 	if err != nil {
 		return nil, err
 	}
-	if implementation.Source != "builtin" {
-		return nil, fmt.Errorf("implementation %s for %s is not installed; this Engine does not auto-install repository extensions", implementation.Package.String(), contract.String())
+	if implementation.Source == "builtin" {
+		checker, err := e.Checkers.Get(contract)
+		if err != nil {
+			return nil, err
+		}
+		if checker.Implementation() != implementation.Package {
+			return nil, fmt.Errorf("Checker %s is bound to %s but installed implementation is %s", contract.String(), implementation.Package.String(), checker.Implementation().String())
+		}
+		return checker, nil
 	}
-	checker, err := e.Checkers.Get(contract)
+	e.helperMu.Lock()
+	defer e.helperMu.Unlock()
+	if cached := e.helperCheckers[contract.String()]; cached != nil {
+		return cached, nil
+	}
+	command := implementation.Command
+	if implementation.Source == "repository" {
+		command, err = extensionoci.Install(ctx, extension.KindChecker, contract, implementation, e.Extensions.Repositories)
+		if err != nil {
+			return nil, fmt.Errorf("install Checker %s: %w", contract.String(), err)
+		}
+	}
+	checker, err := helper.NewChecker(ctx, e.Root, contract, implementation, command)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("activate Checker %s: %w", contract.String(), err)
 	}
-	if checker.Implementation() != implementation.Package {
-		return nil, fmt.Errorf("Checker %s is bound to %s but installed implementation is %s", contract.String(), implementation.Package.String(), checker.Implementation().String())
-	}
+	e.helperCheckers[contract.String()] = checker
+	e.helperClosers = append(e.helperClosers, checker)
 	return checker, nil
-}
-
-func (e *Engine) ensureProvider(p provider.Provider) error {
-	if p == nil {
-		return fmt.Errorf("no Provider selected")
-	}
-	_, err := e.providerFor(p.Contract())
-	return err
 }
 
 // discoveryProviders validates all configured candidates before invoking any
 // Provider Match hook. Registered but unbound Providers remain inert.
-func (e *Engine) discoveryProviders() ([]provider.Provider, error) {
-	installed, err := e.Providers.Providers()
-	if err != nil {
+func (e *Engine) discoveryProviders(ctx context.Context) ([]provider.Provider, error) {
+	if err := e.Extensions.Validate(); err != nil {
 		return nil, err
 	}
-	eligible := make([]provider.Provider, 0, len(installed))
-	for _, candidate := range installed {
-		implementation, bound, err := e.Extensions.Lookup(extension.KindProvider, candidate.Contract())
+	var eligible []provider.Provider
+	for _, binding := range e.Extensions.Bindings {
+		if binding.Kind != extension.KindProvider {
+			continue
+		}
+		candidate, err := e.providerFor(ctx, binding.Contract)
 		if err != nil {
 			return nil, err
 		}
-		if !bound {
-			continue
-		}
-		if implementation.Source != "builtin" {
-			return nil, fmt.Errorf("implementation %s for %s is not installed; this Engine does not auto-install repository extensions", implementation.Package.String(), candidate.Contract().String())
-		}
-		if candidate.Implementation() != implementation.Package {
-			return nil, fmt.Errorf("Provider %s is bound to %s but installed implementation is %s", candidate.Contract().String(), implementation.Package.String(), candidate.Implementation().String())
-		}
 		eligible = append(eligible, candidate)
 	}
+	sort.Slice(eligible, func(i, j int) bool { return eligible[i].Contract().String() < eligible[j].Contract().String() })
 	return eligible, nil
+}
+
+// Close ends every Helper process activated during this Engine command.
+func (e *Engine) Close() error {
+	e.helperMu.Lock()
+	defer e.helperMu.Unlock()
+	var first error
+	for i := len(e.helperClosers) - 1; i >= 0; i-- {
+		if err := e.helperClosers[i].Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	e.helperClosers = nil
+	return first
 }
 
 func (e *Engine) Init(ctx context.Context, sessionID string) (protocol.InstanceManifest, error) {

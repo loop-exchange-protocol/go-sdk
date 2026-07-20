@@ -11,9 +11,9 @@ import (
 )
 
 type ApplyTarget struct {
-	Workdir  string
-	Path     string
-	Children []protocol.ChildComponent
+	Workdir  string                    `json:"workdir"`
+	Path     string                    `json:"path"`
+	Children []protocol.ChildComponent `json:"children,omitempty"`
 }
 
 // Provider reconciles one globally identified content contract. Validate must

@@ -125,6 +125,7 @@ func runInit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	instance, err := e.InitAt(ctx, *sessionID, absWorkdir)
 	if err != nil {
 		return err
@@ -149,6 +150,7 @@ func runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	status, err := e.StatusContext(ctx, resolvedSession)
 	if err != nil {
 		return err
@@ -201,6 +203,7 @@ func runAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	instance, err := e.AddWithOptionsContext(ctx, resolvedSession, paths, engine.AddOptions{Provider: providerID})
 	if err != nil {
 		return err
@@ -247,6 +250,7 @@ func runImport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	if instance, ready, err := e.ReadyBundleImport(engine.BundleImportOptions{Bundle: bundlePath, SessionID: *sessionID, Workdir: workdir}); err != nil {
 		return err
 	} else if ready {
@@ -279,7 +283,7 @@ func runImport(ctx context.Context, args []string) error {
 		opts.SecretEnv[slot] = name
 	}
 	if *interactive {
-		opts, err = lxpruntime.RunChecklist(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), opts, os.Stdin, os.Stdout)
+		opts, err = e.RunRequirementChecklist(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), opts, os.Stdin, os.Stdout)
 		if err != nil {
 			return err
 		}
@@ -314,6 +318,7 @@ func runRequirements(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	artifact, err := validateProductionBundle(ctx, e, bundlePath)
 	if err != nil {
 		return err
@@ -340,13 +345,16 @@ func runRequirements(ctx context.Context, args []string) error {
 		opts.SecretEnv[slot] = name
 	}
 	if *format == "json" {
-		items := lxpruntime.Check(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), opts)
+		items, err := e.CheckRequirements(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), opts)
+		if err != nil {
+			return err
+		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"ready": lxpruntime.AllRequiredReady(items), "items": items})
 	}
 	if *format != "tui" {
 		return fmt.Errorf("unsupported format %q", *format)
 	}
-	opts, err = lxpruntime.RunChecklist(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), opts, os.Stdin, os.Stdout)
+	opts, err = e.RunRequirementChecklist(ctx, artifact.Requirements, requiredArtifactRequirements(artifact.Components), opts, os.Stdin, os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -477,6 +485,7 @@ func runExport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	path, err := e.Export(ctx, engine.ExportOptions{
 		SessionID:    resolvedSession,
 		Namespace:    "local",
@@ -516,6 +525,7 @@ func runInspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer e.Close()
 	if _, err := validateProductionBundle(ctx, e, fs.Arg(0)); err != nil {
 		return err
 	}

@@ -9,6 +9,9 @@ import (
 )
 
 func TestDefaultResolvesBuiltinGitProvider(t *testing.T) {
+	if err := Default().Validate(); err != nil {
+		t.Fatalf("default config is invalid: %v", err)
+	}
 	contract := spec.Contract{Namespace: "loop.exchange", Name: "git", Version: "v1"}
 	implementation, err := Default().Resolve(KindProvider, contract)
 	if err != nil {
@@ -16,6 +19,9 @@ func TestDefaultResolvesBuiltinGitProvider(t *testing.T) {
 	}
 	if implementation.Source != "builtin" || implementation.Package.Name != "provider-git" {
 		t.Fatalf("unexpected implementation: %#v", implementation)
+	}
+	if len(Default().Repositories) != 1 || Default().Repositories[0].URL != "oci://ghcr.io/loop-exchange-protocol" {
+		t.Fatalf("unexpected official repository: %#v", Default().Repositories)
 	}
 }
 
@@ -59,7 +65,7 @@ func TestRepositoryBindingUsesOrderedRepositories(t *testing.T) {
 	config := Config{
 		APIVersion:   spec.APIVersion,
 		Kind:         "EngineConfig",
-		Repositories: []Repository{{ID: "central", URL: "https://packages.example.test/lxp"}},
+		Repositories: []Repository{{ID: "central", URL: "oci://packages.example.test/lxp", AutoInstall: true, TrustedNamespaces: []string{"example.test"}}},
 		Bindings: []Binding{{
 			Kind:           KindProvider,
 			Contract:       spec.Contract{Namespace: "example.test", Name: "source", Version: "v1"},
@@ -68,5 +74,40 @@ func TestRepositoryBindingUsesOrderedRepositories(t *testing.T) {
 	}
 	if err := config.Validate(); err != nil {
 		t.Fatalf("ordered repository binding rejected: %v", err)
+	}
+}
+
+func TestHelperBindingUsesArgv(t *testing.T) {
+	config := Config{
+		APIVersion: spec.APIVersion,
+		Kind:       "EngineConfig",
+		Bindings: []Binding{{
+			Kind:     KindProvider,
+			Contract: spec.Contract{Namespace: "example.test", Name: "source", Version: "v1"},
+			Implementation: Implementation{
+				Source:  "helper",
+				Package: spec.Contract{Namespace: "example.test", Name: "provider-source", Version: "1.0.0"},
+				Command: []string{"lxp-provider-source", "serve"},
+			},
+		}},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Helper binding rejected: %v", err)
+	}
+}
+
+func TestRepositoryBindingRequiresExplicitNamespaceTrust(t *testing.T) {
+	config := Config{
+		APIVersion:   spec.APIVersion,
+		Kind:         "EngineConfig",
+		Repositories: []Repository{{ID: "central", URL: "oci://packages.example.test/lxp"}},
+		Bindings: []Binding{{
+			Kind:           KindProvider,
+			Contract:       spec.Contract{Namespace: "example.test", Name: "source", Version: "v1"},
+			Implementation: Implementation{Source: "repository", Package: spec.Contract{Namespace: "example.test", Name: "provider-source", Version: "1.0.0"}, Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		}},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("repository binding without explicit trust unexpectedly accepted")
 	}
 }

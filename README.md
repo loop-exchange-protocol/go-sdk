@@ -10,7 +10,7 @@
 e := engine.New(stateRoot, providers...)
 ```
 
-Provider 作者主要实现 `pkg/provider.Provider`。每个 Provider 同时声明全局唯一、语言无关的 contract 坐标和精确 implementation package 坐标；EngineConfig binding 必须与实际注册实现完全一致。官方 Production MVP 只绑定 `loop.exchange:git:v1`。`Validate` 必须在不写入 Component 内容的前提下完成校验，`Apply` 必须幂等且可重试。需要原生变更选择时可额外实现 `Tracker`，需要接管既有目录时实现 `Adopter`；`NestedDiscoverer` 返回 Provider-native direct child roots，`BoundaryTracker` 同步 gitlink 等父边界 metadata。Engine 由 lexical path 推导嵌套拓扑，普通操作路由到最深 root，Import 父到子、Export 子到父；Artifact 不包含 mount capability DSL。协议规范、Schema 与权威示例位于 [`loop-exchange-protocol`](https://github.com/loop-exchange-protocol/loop-exchange-protocol)。
+Provider 作者主要实现 `pkg/provider.Provider`。每个 Provider 同时声明全局唯一、语言无关的 contract 坐标和精确 implementation package 坐标；EngineConfig binding 与 Helper `initialize` 握手必须和实现完全一致。官方 Production MVP 只绑定 `loop.exchange:git:v1`。`Validate` 必须在不写入 Component 内容的前提下完成校验，`Apply` 必须幂等且可重试。需要原生变更选择时可额外实现 `Tracker`，需要接管既有目录时实现 `Adopter`；`NestedDiscoverer` 返回 Provider-native direct child roots，`BoundaryTracker` 同步 gitlink 等父边界 metadata。Engine 由 lexical path 推导嵌套拓扑，普通操作路由到最深 root，Import 父到子、Export 子到父；Artifact 不包含 mount capability DSL。协议规范、Schema 与权威示例位于 [`loop-exchange-protocol`](https://github.com/loop-exchange-protocol/loop-exchange-protocol)。
 
 通用 Engine API 按 Provider 声明支持 `reference`、`embedded` 与 `mirrored`；Component 将实际 distribution、locator、revision 与 payload 交给对应 contract 校验和应用。Mirrored 的 reference/embedded revision 必须相同，安全 locator、selected state 与 fallback 语义由对应 contract 定义。Import 在调用 `Apply` 前写入 `importing` state 并固定本地扩展解析结果，在每个 Component 成功后持久化进度；失败不会回滚或清理已完成内容，使用同一 Artifact 与同一实现重试会继续收敛，已为 `ready` 的 Session 重试为 no-op。
 
@@ -36,6 +36,8 @@ cd cmd/lxp && go test -race ./... && go vet ./...
 ```
 
 `cmd/lxp` 是独立嵌套 module，也是官方 Production MVP composition root：它只组合本仓 library、Engine 与 `provider-git`。公开命令面为 `init/add/status/export/import/inspect/requirements`；`lxp export --distribution` 支持 reference/embedded/mirrored `.lxpz`（默认 embedded），Import 自动读取 Artifact 声明。
+
+EngineConfig 的 `source: helper` 直接执行本地 argv；`source: repository` 只从本地显式 `auto_install`、namespace allowlist 的 OCI repository 按 manifest digest 拉取 platform-specific executable。Helper 通过 stdin/stdout NDJSON 精确握手并在当前命令结束时退出，不使用 Go plugin ABI，也不经过 shell。Artifact 只声明 contract，不能选择 repository、command、digest 或授权执行。默认 CLI 仍内置 Git Provider，因此普通 quickstart 不要求联网；`provider-git` 仓库同时构建 `lxp-provider-git` 作为标准 Helper 样例。
 
 真实三仓布局中的 Harness 位于 `provider-git`，并直接验证上述公开 CLI 的 reference 在线导入、reference 离线失败与可重试状态，以及 mirrored 离线 fallback。
 
